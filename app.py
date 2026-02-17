@@ -511,11 +511,11 @@ with tab1:
 # =========================================================
 # TAB 2: DETENCIONES
 # =========================================================
+# =========================================================
+# TAB 2: DETENCIONES
+# =========================================================
 with tab2:
     st.subheader("Detenciones — análisis")
-
-    st.divider()
-    st.subheader("DM / DE / DO — Conteo, HH y Top equipos")
 
     if det_f.empty or "Tipo" not in det_f.columns:
         st.info("No hay detenciones filtradas o falta columna 'Tipo'.")
@@ -523,58 +523,78 @@ with tab2:
         df_dm = det_f.copy()
         df_dm["DMDEDO"] = df_dm["Tipo"].apply(map_dmde_do)
 
-        c1a, c2a = st.columns(2)
-        count_dm = df_dm.groupby("DMDEDO").size().reset_index(name="Cantidad").sort_values("Cantidad", ascending=False)
-        c1a.plotly_chart(px.bar(count_dm, x="DMDEDO", y="Cantidad", title="Cantidad por DM/DE/DO"),
-                         use_container_width=True)
+        col_left, col_right = st.columns(2)
 
-        if "Horas de reparación" in df_dm.columns:
-            hh_dm = df_dm.groupby("DMDEDO")["Horas de reparación"].sum().reset_index().sort_values("Horas de reparación", ascending=False)
-            c2a.plotly_chart(px.bar(hh_dm, x="DMDEDO", y="Horas de reparación", title="HH por DM/DE/DO"),
-                             use_container_width=True)
+        # Conteo por DM/DE/DO
+        count_dm = (
+            df_dm.groupby("DMDEDO")
+            .size()
+            .reset_index(name="Cantidad")
+            .sort_values("Cantidad", ascending=False)
+        )
 
-            if "Equipo" in df_dm.columns:
-                tipo_opts = sorted([x for x in df_dm["DMDEDO"].dropna().unique()])
-                tipo_sel = st.selectbox("Ver Top equipos por HH para", options=tipo_opts, key="tab2_sel_dm_tipo")
-                sub = df_dm[df_dm["DMDEDO"] == tipo_sel]
-                top_eq = sub.groupby("Equipo")["Horas de reparación"].sum().reset_index().sort_values("Horas de reparación", ascending=False).head(10)
-                st.plotly_chart(px.bar(top_eq, x="Equipo", y="Horas de reparación", title=f"Top 10 equipos por HH — {tipo_sel}"),
-                                use_container_width=True)
-
-    st.divider()
-    st.subheader("Análisis por familia / componente / modo de falla")
-
-    cA2, cB2 = st.columns(2)
-    if all(col in det_f.columns for col in ["Familia Equipo", "Clasificación"]) and det_f.shape[0] > 0:
-        pivot = det_f.pivot_table(index="Familia Equipo", columns="Clasificación",
-                                  values="Equipo", aggfunc="count", fill_value=0).reset_index()
-        cA2.plotly_chart(
+        col_left.plotly_chart(
             px.bar(
-                pivot.melt(id_vars=["Familia Equipo"], var_name="Clasificación", value_name="Cantidad"),
-                x="Familia Equipo", y="Cantidad", color="Clasificación", barmode="stack",
-                title="Cantidad de fallas por Familia y Clasificación"
+                count_dm,
+                x="DMDEDO",
+                y="Cantidad",
+                title="Cantidad por DM / DE / DO"
             ),
-            use_container_width=True
+            use_container_width=True,
+            key="det_bar_dm_count_unique"
         )
 
-    if all(col in det_f.columns for col in ["Equipo", "Clasificación", "Horas de reparación"]) and det_f.shape[0] > 0:
-        pe = det_f.groupby(["Equipo", "Clasificación"])["Horas de reparación"].sum().reset_index()
-        cB2.plotly_chart(
-            px.bar(pe, x="Equipo", y="Horas de reparación", color="Clasificación", barmode="stack",
-                   title="HH por Equipo y Clasificación"),
-            use_container_width=True
-        )
+        # HH por DM/DE/DO
+        if "Horas de reparación" in df_dm.columns:
+            hh_dm = (
+                df_dm.groupby("DMDEDO")["Horas de reparación"]
+                .sum()
+                .reset_index()
+                .sort_values("Horas de reparación", ascending=False)
+            )
 
-    cC2, cD2 = st.columns(2)
-    if "Componente" in det_f.columns and "Horas de reparación" in det_f.columns and det_f.shape[0] > 0:
-        comp = det_f.groupby("Componente")["Horas de reparación"].sum().reset_index().sort_values("Horas de reparación", ascending=False).head(15)
-        cC2.plotly_chart(px.bar(comp, x="Componente", y="Horas de reparación", title="Top 15 Componentes por HH"),
-                         use_container_width=True)
+            col_right.plotly_chart(
+                px.bar(
+                    hh_dm,
+                    x="DMDEDO",
+                    y="Horas de reparación",
+                    title="HH por DM / DE / DO"
+                ),
+                use_container_width=True,
+                key="det_bar_dm_hh_unique"
+            )
 
-    if "Modo de Falla" in det_f.columns and "Horas de reparación" in det_f.columns and det_f.shape[0] > 0:
-        modo = det_f.groupby("Modo de Falla")["Horas de reparación"].sum().reset_index().sort_values("Horas de reparación", ascending=False).head(15)
-        cD2.plotly_chart(px.bar(modo, x="Modo de Falla", y="Horas de reparación", title="Top 15 Modos por HH"),
-                         use_container_width=True)
+        st.divider()
+
+        # Top equipos por tipo
+        if "Equipo" in df_dm.columns and "Horas de reparación" in df_dm.columns:
+            tipo_opts = sorted(df_dm["DMDEDO"].dropna().unique())
+            tipo_sel = st.selectbox(
+                "Ver Top equipos por HH para",
+                options=tipo_opts,
+                key="det_sel_tipo_unique"
+            )
+
+            sub = df_dm[df_dm["DMDEDO"] == tipo_sel]
+
+            top_eq = (
+                sub.groupby("Equipo")["Horas de reparación"]
+                .sum()
+                .reset_index()
+                .sort_values("Horas de reparación", ascending=False)
+                .head(10)
+            )
+
+            st.plotly_chart(
+                px.bar(
+                    top_eq,
+                    x="Equipo",
+                    y="Horas de reparación",
+                    title=f"Top 10 equipos por HH — {tipo_sel}"
+                ),
+                use_container_width=True,
+                key="det_bar_top_unique"
+            )
 
     st.subheader("Tabla detenciones filtradas")
     st.dataframe(det_f, use_container_width=True, height=420)
