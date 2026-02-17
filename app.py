@@ -368,8 +368,6 @@ col_fprop = find_first_col(estado, ["F.Propuesta", "F Propuesta", "F. Propuesta"
 col_obs = find_first_col(estado, ["Observacion", "Observación", "OBSERVACION", "OBSERVACIÓN"])
 
 
-    cA, cB, cC, cD = st.columns(4)
-
     if estado.empty or col_tracto is None or col_status is None:
         cA.metric("Flota (hoy)", "—")
         cB.metric("Operativos (hoy)", "—")
