@@ -493,6 +493,13 @@ with tab0:
             hh = dfx.groupby("DMDEDO")["Horas de reparación"].sum().reset_index().sort_values("Horas de reparación", ascending=False)
             cR.plotly_chart(px.bar(hh, x="DMDEDO", y="Horas de reparación", title="HH por DM/DE/DO"),
                             use_container_width=True, key="tab0_bar_dm_hh")
+            
+# --- normalizar % (Excel a veces guarda 90% como 0.9) ---
+for c in [col_util_dem, col_util_oferta, col_util_cap]:
+    if c and c in dfu.columns:
+        dfu[c] = percent_to_0_100(dfu[c])
+       if "Disponibilidad" in dfu.columns:
+             dfu["Disponibilidad_%"] = percent_to_0_100(normalize_disponibilidad_to_0_1(dfu["Disponibilidad"]) * 100)
 
 # =========================================================
 # TAB 1: RESUMEN
