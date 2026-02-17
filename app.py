@@ -695,15 +695,6 @@ with tabU:
             dfu["Indicador_cuello_botella"] = dfu.apply(_cuello, axis=1)
             col_indicador = "Indicador_cuello_botella"
 
-        # ✅ NORMALIZACIÓN DE PORCENTAJES (SOLO AQUÍ EN TABU)
-        for c in [col_util_dem, col_util_oferta, col_util_cap]:
-            if c and c in dfu.columns:
-                dfu[c] = percent_to_0_100(dfu[c])
-
-        # (opcional) Disponibilidad como %
-        if "Disponibilidad" in dfu.columns and dfu["Disponibilidad"].notna().any():
-            dfu["Disponibilidad_%"] = percent_to_0_100(normalize_disponibilidad_to_0_1(dfu["Disponibilidad"]) * 100)
-
         k1, k2, k3, k4 = st.columns(4)
 
         def _mean(colname):
