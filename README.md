@@ -1,23 +1,22 @@
 # Dashboard Tractos (Streamlit)
 
-## Qué muestra
-- Portada ejecutiva: Estado actual flota + Utilización + DM/DE/DO + Salud Operacional
-- Detenciones: análisis y DM/DE/DO con top equipos
-- Disponibilidad (Faena)
-- Utilización (Target vs Real) + matriz + brecha
-- Export CSV
-
-## Requisitos
-- Python 3.12
-
-## Variables de entorno (opcional)
-- EXCEL_URL: URL export XLSX del sheet principal
-- ESTADO_URL: URL export XLSX del sheet Estado_Flota
-- SHEET_FAENA: nombre hoja faena (default Faena)
-- SHEET_DET: nombre hoja detenciones (default Detenciones)
-- SHEET_ESTADO: nombre hoja estados (default Estado_Flota)
-- REFRESH_SEC: refresco (default 120)
+Dashboard online para:
+- Portada ejecutiva: flota operativa hoy + ubicación + fuera de servicio (acción)
+- Utilización: solicitado (Target) vs usado (Tractos OP), brecha y semáforo
+- Detenciones: DM/DE/DO, Pareto por HH, componentes y modos de falla
+- Disponibilidad por faena
+- Export de datos filtrados
 
 ## Deploy
-- Streamlit Community Cloud: conectar repo y listo.
-- Asegurar que ambos Google Sheets estén "Cualquier persona con enlace -> Lector".
+- Subir repo a GitHub
+- Streamlit Community Cloud: New app -> seleccionar repo -> main file: app.py
+
+## Variables de entorno (opcional)
+- EXCEL_URL: URL de export XLSX del sheet principal (Faena/Detenciones)
+- ESTADO_URL: URL de export XLSX del sheet de Estado_Flota
+- SHEET_FAENA / SHEET_DET / SHEET_ESTADO
+- REFRESH_SEC: refresco en segundos (default 120)
+
+## Requisito
+Asegurar que ambos Google Sheets estén:
+Compartir -> Cualquier persona con el enlace -> Lector
