@@ -353,7 +353,7 @@ tab0, tab1, tab2, tab3, tabU, tab4 = st.tabs(
 # TAB 0: ESTADO GENERAL
 # =========================================================
 with tab0:
-    st.subheader("🏠 Estado General (Ejecutivo) — lo esencial en una pantalla")
+    st.subheader("🏠 Estado General")
 
     st.markdown("### 1) Estado actual de flota (hoy)")
     try:
