@@ -114,13 +114,35 @@ def is_valid_tracto_code(x: str) -> bool:
 
 def percent_to_0_100(series: pd.Series) -> pd.Series:
     """
-    Normaliza porcentajes a escala 0..100
-    - Si viene como 0.9 (90%), lo convierte a 90
-    - Si ya viene como 90, lo deja igual
+    Convierte porcentajes leídos desde Excel a escala 0..100.
+    - Si vienen como 0.8, 1.0 => los pasa a 80, 100
+    - Si ya vienen como 80, 100 => los deja igual
+    - Si vienen como texto "80%" => los convierte a 80
     """
-    s = pd.to_numeric(series, errors="coerce")
-    if s.notna().any() and s.max() <= 1.5:
-        return s * 100.0
+    if series is None:
+        return series
+
+    s = series.copy()
+
+    # Si vienen como texto tipo "80%" o "0,8"
+    if s.dtype == "object":
+        s = s.astype(str).str.replace("%", "", regex=False)
+        s = s.str.replace(",", ".", regex=False)
+
+    s = pd.to_numeric(s, errors="coerce")
+
+    if s.notna().any():
+        mx = float(s.max())
+        # típico Excel: 0..1 con formato %
+        if mx <= 1.5:
+            return s * 100.0
+        # típico ya en 0..100
+        if mx <= 150.0:
+            return s
+        # por si alguien guardó 8000 en vez de 80
+        if mx > 150.0:
+            return s / 100.0
+
     return s
 
 # =========================================================
@@ -786,6 +808,171 @@ with tabU:
                 cols_show.append(c)
 
         st.dataframe(dfu[cols_show], use_container_width=True, height=480)
+
+with tabU:
+    st.subheader("📈 Utilización — Demanda vs Oferta vs Capacidad (Faena)")
+
+    dfu = faena_f.copy()
+    if dfu.empty:
+        st.info("No hay registros de Faena con los filtros actuales.")
+    else:
+        # --- detectar columnas base ---
+        col_target = find_first_col(dfu, ["Target Operación", "Target Operacion", "Target"])
+        col_used = find_first_col(dfu, ["Tractos Utilizados", "Tractos utilizados"])
+        col_op = find_first_col(dfu, ["Tractos OP", "Tractos Op"])
+        col_cap_real = find_first_col(dfu, ["Capacidad_Real", "Capacidad Real"])
+        col_cap_ops = find_first_col(dfu, ["Capacidad_Operadores", "Capacidad Operadores"])
+
+        # Usados reales: preferir Tractos Utilizados; si no existe, usar Tractos OP
+        col_real_used = col_used if col_used is not None else col_op
+
+        # --- detectar si ya existen columnas calculadas (como en tu Excel) ---
+        col_util_dem = find_first_col(dfu, ["Utilizacion_demandada_%", "Utilización_demandada_%"])
+        col_util_oferta = find_first_col(dfu, ["Utilizacion_Oferta_%", "Utilización_Oferta_%"])
+        col_util_cap = find_first_col(dfu, ["Utilizacion_Capacidad_%", "Utilización_Capacidad_%"])
+        col_brecha = find_first_col(dfu, ["Brecha(Target-OP)", "Brecha_(Target-OP)", "Brecha(Target-Usados)", "Brecha_(Target-Usados)"])
+        col_indicador = find_first_col(dfu, ["Indicador_cuello_botella", "Indicador cuello botella", "Indicador_cuello_botella_isponi"])
+
+        # --- asegurar numéricos base ---
+        for c in [col_target, col_real_used, col_cap_real, col_cap_ops]:
+            if c is not None and c in dfu.columns:
+                dfu[c] = pd.to_numeric(dfu[c], errors="coerce")
+
+        # --- si no existen, calcular aquí (en % 0..100) ---
+        if col_util_dem is None and (col_target is not None and col_real_used is not None):
+            dfu["Utilizacion_demandada_%"] = (dfu[col_real_used] / dfu[col_target]) * 100.0
+            col_util_dem = "Utilizacion_demandada_%"
+
+        if col_brecha is None and (col_target is not None and col_real_used is not None):
+            dfu["Brecha(Target-OP)"] = dfu[col_target] - dfu[col_real_used]
+            col_brecha = "Brecha(Target-OP)"
+
+        # Oferta = usados / capacidad_real (tractos disponibles operativos)
+        if col_util_oferta is None and (col_cap_real is not None and col_real_used is not None):
+            dfu["Utilizacion_Oferta_%"] = (dfu[col_real_used] / dfu[col_cap_real]) * 100.0
+            col_util_oferta = "Utilizacion_Oferta_%"
+
+        # Capacidad = usados / capacidad_operadores
+        if col_util_cap is None and (col_cap_ops is not None and col_real_used is not None):
+            dfu["Utilizacion_Capacidad_%"] = (dfu[col_real_used] / dfu[col_cap_ops]) * 100.0
+            col_util_cap = "Utilizacion_Capacidad_%"
+
+        # --- NORMALIZAR % leídos desde Excel (0.8 -> 80) ---
+        for c in [col_util_dem, col_util_oferta, col_util_cap]:
+            if c is not None and c in dfu.columns:
+                dfu[c] = percent_to_0_100(dfu[c])
+
+        # Disponibilidad (si existe) dejarla como % 0..100 para la tabla/hover si quieres
+        if "Disponibilidad" in dfu.columns:
+            disp01 = normalize_disponibilidad_to_0_1(dfu["Disponibilidad"])
+            dfu["Disponibilidad_%"] = percent_to_0_100(disp01)  # disp01 puede venir 0..1
+
+        # Indicador cuello botella (si no existe)
+        if col_indicador is None:
+            def _cuello(row):
+                try:
+                    tgt = float(row[col_target]) if col_target else None
+                    used = float(row[col_real_used]) if col_real_used else None
+                    capr = float(row[col_cap_real]) if col_cap_real else None
+                    capo = float(row[col_cap_ops]) if col_cap_ops else None
+                except Exception:
+                    return ""
+
+                if tgt is None or used is None or pd.isna(tgt) or pd.isna(used):
+                    return ""
+
+                if used + 1e-9 < tgt:
+                    falta_flota = (capr is not None and (not pd.isna(capr)) and capr + 1e-9 < tgt)
+                    falta_ops = (capo is not None and (not pd.isna(capo)) and capo + 1e-9 < tgt)
+
+                    if falta_ops and falta_flota:
+                        return "FALTA FLOTA + OPERADORES"
+                    if falta_ops:
+                        return "FALTA OPERADORES"
+                    if falta_flota:
+                        return "FALTA FLOTA"
+                    return "COORDINACIÓN / DEMANDA NO CUBIERTA"
+
+                return "BALANCEADO"
+
+            dfu["Indicador_cuello_botella"] = dfu.apply(_cuello, axis=1)
+            col_indicador = "Indicador_cuello_botella"
+
+        # --- KPIs ---
+        k1, k2, k3, k4 = st.columns(4)
+
+        def _mean(colname):
+            if colname is None or colname not in dfu.columns:
+                return None
+            v = pd.to_numeric(dfu[colname], errors="coerce").mean()
+            return None if pd.isna(v) else float(v)
+
+        m_dem = _mean(col_util_dem)
+        m_ofer = _mean(col_util_oferta)
+        m_cap = _mean(col_util_cap)
+        m_bre = _mean(col_brecha)
+
+        k1.metric("Utilización demandada (Usados/Target)", "—" if m_dem is None else f"{m_dem:.1f}%")
+        k2.metric("Utilización oferta (Usados/Cap. Real)", "—" if m_ofer is None else f"{m_ofer:.1f}%")
+        k3.metric("Utilización capacidad (Usados/Cap. Operadores)", "—" if m_cap is None else f"{m_cap:.1f}%")
+        k4.metric("Brecha promedio (Target − Usados)", "—" if m_bre is None else f"{m_bre:.2f}")
+
+        st.divider()
+
+        # 1) Target vs Usados por día
+        if "Inicio OP" in dfu.columns and dfu["Inicio OP"].notna().any() and col_target and col_real_used:
+            dfu["Fecha"] = pd.to_datetime(dfu["Inicio OP"], errors="coerce").dt.date
+            g = dfu.groupby("Fecha")[[col_target, col_real_used]].mean().reset_index()
+            st.plotly_chart(
+                px.line(
+                    g.melt(id_vars=["Fecha"], var_name="Métrica", value_name="Cantidad"),
+                    x="Fecha", y="Cantidad", color="Métrica", markers=True,
+                    title="Target Operación vs Tractos usados (promedio por día)"
+                ),
+                use_container_width=True,
+                key="tabU_line_target_used"
+            )
+
+        # 2) Utilizaciones por Terminal (barras agrupadas)
+        if "Terminal" in dfu.columns:
+            metrics = [c for c in [col_util_dem, col_util_oferta, col_util_cap] if c and c in dfu.columns]
+            if metrics:
+                gt = dfu.groupby("Terminal")[metrics].mean().reset_index()
+                melt = gt.melt(id_vars=["Terminal"], var_name="Métrica", value_name="Porcentaje")
+                st.plotly_chart(
+                    px.bar(melt, x="Terminal", y="Porcentaje", color="Métrica", barmode="group",
+                           title="Utilizaciones promedio por Terminal"),
+                    use_container_width=True,
+                    key="tabU_bar_utils_terminal"
+                )
+
+        # 3) Cuello de botella (conteo)
+        if col_indicador and col_indicador in dfu.columns:
+            bott = dfu.groupby(col_indicador).size().reset_index(name="Cantidad").sort_values("Cantidad", ascending=False)
+            st.plotly_chart(
+                px.bar(bott, x=col_indicador, y="Cantidad", title="Indicador de cuello de botella (conteo)"),
+                use_container_width=True,
+                key="tabU_bar_bottleneck"
+            )
+
+        st.divider()
+        st.subheader("Tabla de utilización (gestión)")
+
+        cols_show = []
+        for c in [
+            "Inicio OP", "Terminal", "Buque",
+            col_target, col_real_used,
+            col_cap_real, col_cap_ops,
+            col_util_dem, col_util_oferta, col_util_cap,
+            col_brecha,
+            col_indicador,
+            "Disponibilidad_%"
+        ]:
+            if c and c in dfu.columns and c not in cols_show:
+                cols_show.append(c)
+
+        st.dataframe(dfu[cols_show], use_container_width=True, height=480)
+
 
 # =========================================================
 # TAB 4: EXPORT
