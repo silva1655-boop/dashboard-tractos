@@ -11,7 +11,7 @@ from streamlit_autorefresh import st_autorefresh
 # =========================================================
 # PAGE CONFIG
 # =========================================================
-st.set_page_config(page_title="Dashboard Tractos", layout="wide")
+st.set_page_config(page_title="Dashboard Tractos Navimag", layout="wide")
 
 # =========================================================
 # CONFIG (Google Sheets -> export XLSX)
@@ -41,7 +41,6 @@ def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = [re.sub(r"\s+", " ", str(c)).strip() for c in df.columns]
     return df
 
-
 def _to_datetime(df: pd.DataFrame, cols):
     df = df.copy()
     for c in cols:
@@ -49,18 +48,17 @@ def _to_datetime(df: pd.DataFrame, cols):
             df[c] = pd.to_datetime(df[c], errors="coerce")
     return df
 
-
 def _safe_upper(s):
     if pd.isna(s):
         return None
     return str(s).strip().upper()
-
 
 def download_google_xlsx(url: str) -> bytes:
     headers = {"User-Agent": "Mozilla/5.0"}
     r = requests.get(url, headers=headers, timeout=60)
     r.raise_for_status()
 
+    # Si por permisos Google devolviera HTML
     ctype = r.headers.get("Content-Type", "")
     if "text/html" in ctype.lower():
         raise RuntimeError(
@@ -68,7 +66,6 @@ def download_google_xlsx(url: str) -> bytes:
             "Asegura: Compartir -> Cualquier persona con el enlace -> Lector."
         )
     return r.content
-
 
 def find_first_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
     if df is None or df.empty:
@@ -83,15 +80,17 @@ def find_first_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
             return norm[key]
     return None
 
-
 def normalize_disponibilidad_to_0_1(series: pd.Series) -> pd.Series:
     s = pd.to_numeric(series, errors="coerce")
     if s.notna().any() and s.max() > 1.5:
         return s / 100.0
     return s
 
-
 def _make_unique_columns(cols):
+    """
+    Fuerza nombres de columnas únicos:
+    Observacion, Observacion__2, Observacion__3 ...
+    """
     seen = {}
     out = []
     for c in cols:
@@ -106,11 +105,23 @@ def _make_unique_columns(cols):
             out.append(f"{base}__{seen[base]}")
     return out
 
-
-def chart_key(name: str) -> str:
-    """Keys únicos para evitar StreamlitDuplicateElementId."""
-    return f"chart_{name}"
-
+def is_valid_tracto_code(x: str) -> bool:
+    """
+    Valida códigos tipo: T648, K69, K72, M01, MOL3 (si lo tuvieras), etc.
+    En tu planilla real suelen ser: letra(s) + números.
+    """
+    if x is None:
+        return False
+    s = str(x).strip().upper()
+    if s in ("", "TOTAL", "EN SERVICIO", "FUERA DE SERVICIO", "EN MTTO", "EN MANTTO", "ESTADO", "UBICACIÓN", "UBICACION"):
+        return False
+    # patrón base: 1 a 4 letras + 1 a 4 dígitos (M01 pasa)
+    if re.match(r"^[A-Z]{1,4}\d{1,4}$", s):
+        return True
+    # patrón alterno por si aparece "MOL 3" o "MOL3"
+    if re.match(r"^[A-Z]{1,4}\s?\d{1,4}$", s):
+        return True
+    return False
 
 # =========================================================
 # LOADERS
@@ -127,16 +138,9 @@ def load_main() -> tuple[pd.DataFrame, pd.DataFrame]:
 
     # FAENA
     faena = _to_datetime(faena, ["Inicio OP", "Termino Op", "Termino OP", "Término OP"])
-    for c in [
-        "Horas Operación", "Horas de operación",
-        "Indisponibilidad [HH]",
-        "Disponibilidad",
-        "Target Operación", "Target Operacion", "Target",
-        "Tractos OP", "Tractos Op",
-        "Tractos Utilizados", "Tractos utilizados",
-        "Capacidad_Real", "Capacidad Real",
-        "Capacidad_Operadores", "Capacidad Operadores",
-    ]:
+    for c in ["Horas Operación", "Horas de operación", "Indisponibilidad [HH]", "Disponibilidad",
+              "Target Operación", "Target Operacion", "Tractos OP", "Tractos Utilizados",
+              "Capacidad_Operadores", "Capacidad Operadores", "Capacidad_Real", "Capacidad Real"]:
         if c in faena.columns:
             faena[c] = pd.to_numeric(faena[c], errors="coerce")
 
@@ -159,16 +163,15 @@ def load_main() -> tuple[pd.DataFrame, pd.DataFrame]:
 
     return faena, det
 
-
 @st.cache_data(ttl=DEFAULT_REFRESH_SEC, show_spinner=False)
 def load_estado() -> pd.DataFrame:
     """
     Lee Estado_Flota aunque tenga filas de título arriba (celdas combinadas)
     y aunque existan encabezados duplicados.
-    Luego FILTRA solo filas que sean tractos reales (para no contar las tablas resumen).
     """
     content = download_google_xlsx(ESTADO_URL)
 
+    # Leer crudo sin header
     raw = pd.read_excel(io.BytesIO(content), sheet_name=SHEET_ESTADO, header=None)
     raw = raw.dropna(how="all").fillna("")
 
@@ -184,47 +187,26 @@ def load_estado() -> pd.DataFrame:
             header_idx = i
             break
 
+    # fallback
     if header_idx is None:
         df = pd.read_excel(io.BytesIO(content), sheet_name=SHEET_ESTADO)
         df = _normalize_cols(df)
         df.columns = _make_unique_columns(df.columns)
-    else:
-        hdr = raw.iloc[header_idx].tolist()
-        df = raw.iloc[header_idx + 1:].copy()
-        df.columns = hdr
-        df = df.dropna(how="all")
-        df = _normalize_cols(df)
-        df.columns = _make_unique_columns(df.columns)
+        return df.dropna(how="all")
 
-    # limpiar strings sin depender de dtype de columnas duplicadas
+    hdr = raw.iloc[header_idx].tolist()
+    df = raw.iloc[header_idx + 1:].copy()
+    df.columns = hdr
+    df = df.dropna(how="all")
+    df = _normalize_cols(df)
+    df.columns = _make_unique_columns(df.columns)
+
+    # limpiar strings
     for j in range(df.shape[1]):
         if df.iloc[:, j].dtype == "object":
             df.iloc[:, j] = df.iloc[:, j].astype(str).str.strip()
 
-    # --- FILTRO CLAVE: solo tractos reales ---
-    col_tracto = find_first_col(df, ["#Tracto", "# Tracto", "Tracto", "TRACTO"])
-    if col_tracto is None:
-        return df
-
-    df["_TRACTO_RAW"] = df[col_tracto].astype(str).str.strip().str.upper()
-
-    # acepta: T648, K69, K72, M01, MOL3? (si usas "MOL 3" mejor normalizar en sheet)
-    # patrón conservador: 1-3 letras + 1-4 dígitos (M01, K69, T779, MOL3)
-    pat = re.compile(r"^[A-Z]{1,3}\d{1,4}$")
-
-    # elimina filas típicas de tablas resumen
-    blacklist = {
-        "", "NAN", "TOTAL", "ESTADO", "UBICACIÓN", "UBICACION",
-        "EN SERVICIO", "FUERA DE SERVICIO", "EN MTTO", "EN MANTTO",
-        "DISPONIBILIDAD", "TAREAS"
-    }
-
-    df = df[~df["_TRACTO_RAW"].isin(blacklist)]
-    df = df[df["_TRACTO_RAW"].apply(lambda x: bool(pat.match(x)))]
-    df = df.drop(columns=["_TRACTO_RAW"], errors="ignore")
-
     return df
-
 
 # =========================================================
 # FILTERS
@@ -246,7 +228,6 @@ def filter_det(det: pd.DataFrame, equipos, familias, tipos, naves, fecha_ini, fe
         df = df[df["Nave"].isin(naves)]
     return df
 
-
 def filter_faena(faena: pd.DataFrame, terminales, buques, fecha_ini, fecha_fin):
     df = faena.copy()
     if "Inicio OP" in df.columns and df["Inicio OP"].notna().any():
@@ -259,7 +240,6 @@ def filter_faena(faena: pd.DataFrame, terminales, buques, fecha_ini, fecha_fin):
     if buques and "Buque" in df.columns:
         df = df[df["Buque"].astype(str).str.upper().isin([b.upper() for b in buques])]
     return df
-
 
 # =========================================================
 # MAPPERS
@@ -278,7 +258,6 @@ def map_dmde_do(x):
         return "DO"
     return s
 
-
 def is_operativo_status(status_str: str) -> bool:
     if status_str is None:
         return False
@@ -291,11 +270,10 @@ def is_operativo_status(status_str: str) -> bool:
         return True
     return False
 
-
 # =========================================================
-# UI
+# UI HEADER
 # =========================================================
-st.title("📊 Dashboard Tractos — Ejecutivo + Análisis (Faenas / Detenciones / Estado)")
+st.title("📊 Dashboard Tractos Navimag")
 
 with st.sidebar:
     st.header("⚙️ Actualización")
@@ -376,26 +354,23 @@ tab0, tab1, tab2, tab3, tabU, tab4 = st.tabs(
 )
 
 # =========================================================
-# TAB 0: PORTADA EJECUTIVA
+# TAB 0: ESTADO GENERAL
 # =========================================================
 with tab0:
-    st.subheader("Estado General (Ejecutivo) — lo esencial en una pantalla")
+    st.subheader("🏠 Estado General (Ejecutivo) — lo esencial en una pantalla")
 
-    # 1) Estado actual de flota
     st.markdown("### 1) Estado actual de flota (hoy)")
-
     try:
         estado = load_estado()
         estado = _normalize_cols(estado)
     except Exception as e:
-        st.error("No pude cargar Estado_Flota. Revisa permisos público lector.")
+        st.error("No pude cargar la hoja de ESTADOS. Revisa permisos público lector del sheet de estados.")
         st.code(str(e))
         estado = pd.DataFrame()
 
-    col_tracto = find_first_col(estado, ["#Tracto", "# Tracto", "Tracto", "TRACTO"])
+    col_tracto = find_first_col(estado, ["#Tracto", "Tracto", "# Tracto", "TRACTO"])
     col_status = find_first_col(estado, ["Status", "STATUS"])
     col_ubic = find_first_col(estado, ["Ubicación", "Ubicacion", "UBICACIÓN", "UBICACION"])
-
     col_causa = find_first_col(estado, ["Causa", "CAUSA"])
     col_fprop = find_first_col(estado, ["F.Propuesta", "F Propuesta", "F. Propuesta", "FPROPUESTA"])
     col_obs = find_first_col(estado, ["Observacion", "Observación", "OBSERVACION", "OBSERVACIÓN"])
@@ -407,11 +382,16 @@ with tab0:
         cB.metric("Operativos (hoy)", "—")
         cC.metric("No operativos (hoy)", "—")
         cD.metric("Disponibilidad (hoy)", "—")
-        st.info("Para la portada necesito columnas en Estado_Flota: '#Tracto' (o 'Tracto') y 'Status'.")
+        st.info("Para la portada necesito columnas en Estado_Flota: Tracto y Status.")
     else:
         dfE = estado.copy()
-        dfE[col_status] = dfE[col_status].astype(str).str.upper().str.strip()
-        dfE[col_tracto] = dfE[col_tracto].astype(str).str.upper().str.strip()
+
+        # limpiar base
+        dfE[col_tracto] = dfE[col_tracto].astype(str).str.strip()
+        dfE[col_status] = dfE[col_status].astype(str).str.strip().str.upper()
+
+        # filtrar solo filas de equipos reales (evita totales/resúmenes)
+        dfE = dfE[dfE[col_tracto].apply(is_valid_tracto_code)].copy()
 
         dfE["_operativo"] = dfE[col_status].apply(is_operativo_status)
 
@@ -423,16 +403,19 @@ with tab0:
         cA.metric("Flota (hoy)", f"{total_f:,}".replace(",", "."))
         cB.metric("Operativos (hoy)", f"{op_f:,}".replace(",", "."))
         cC.metric("No operativos (hoy)", f"{no_op_f:,}".replace(",", "."))
-        cD.metric("Disponibilidad (hoy)", "—" if disp_hoy is None else f"{disp_hoy*100:,.1f}%".replace(",", "X").replace(".", ",").replace("X", "."))
+        cD.metric(
+            "Disponibilidad (hoy)",
+            "—" if disp_hoy is None else f"{disp_hoy*100:,.1f}%".replace(",", "X").replace(".", ",").replace("X", ".")
+        )
 
         pie_df = pd.DataFrame({"Estado": ["Operativos", "No operativos"], "Cantidad": [op_f, no_op_f]})
         st.plotly_chart(
             px.pie(pie_df, names="Estado", values="Cantidad", title="Flota hoy (Operativos vs No operativos)"),
             use_container_width=True,
-            key=chart_key("tab0_pie_flota")
+            key="tab0_pie_flotahoy"
         )
 
-        if col_ubic is not None:
+        if col_ubic is not None and col_ubic in dfE.columns:
             st.markdown("#### Disponibilidad hoy por ubicación")
             grp = dfE.groupby(col_ubic)["_operativo"].agg(Total="size", Operativos="sum").reset_index()
             grp["Disponibilidad_%"] = (grp["Operativos"] / grp["Total"]) * 100
@@ -440,53 +423,54 @@ with tab0:
                 px.bar(grp.sort_values("Disponibilidad_%", ascending=False),
                        x=col_ubic, y="Disponibilidad_%", title="Disponibilidad (%) por ubicación"),
                 use_container_width=True,
-                key=chart_key("tab0_bar_disp_ubic")
+                key="tab0_bar_disp_ubic"
             )
 
         st.markdown("#### No operativos (para gestión)")
-        cols_show = [c for c in [col_tracto, col_status, col_ubic, col_causa, col_fprop, col_obs] if c is not None]
-        st.dataframe(dfE[~dfE["_operativo"]][cols_show].head(50), use_container_width=True, height=320)
+        cols_show = []
+        for c in [col_tracto, col_status, col_ubic, col_causa, col_fprop, col_obs]:
+            if c is not None and c in dfE.columns and c not in cols_show:
+                cols_show.append(c)
+        if cols_show:
+            st.dataframe(dfE[~dfE["_operativo"]][cols_show].head(50), use_container_width=True, height=320)
 
     st.divider()
 
-    # 2) Utilización (Target vs Real)
-    st.markdown("### 2) Utilización operacional (Real / Target)")
+    st.markdown("### 2) Cumplimiento operacional (Target vs Usados)")
+    dfu0 = faena_f.copy()
+    col_target0 = find_first_col(dfu0, ["Target Operación", "Target Operacion", "Target"])
+    col_used0 = find_first_col(dfu0, ["Tractos Utilizados", "Tractos utilizados"])
+    col_op0 = find_first_col(dfu0, ["Tractos OP", "Tractos Op"])
+    col_used_real0 = col_used0 if col_used0 is not None else col_op0
 
-    dfu = faena_f.copy()
-    col_target = find_first_col(dfu, ["Target Operación", "Target Operacion", "Target"])
-    col_real = find_first_col(dfu, ["Tractos Utilizados", "Tractos utilizados", "Tractos OP", "Tractos Op"])
-
-    if dfu.empty or col_target is None or col_real is None:
-        st.info("Faltan columnas en Faena: 'Target Operación' y ('Tractos Utilizados' o 'Tractos OP').")
+    if dfu0.empty or col_target0 is None or col_used_real0 is None:
+        st.info("No hay datos de Faena filtrados o faltan columnas Target/Tractos usados.")
     else:
-        dfu[col_target] = pd.to_numeric(dfu[col_target], errors="coerce")
-        dfu[col_real] = pd.to_numeric(dfu[col_real], errors="coerce")
-
-        dfu["Utilización_%"] = (dfu[col_real] / dfu[col_target]) * 100
-        dfu["Brecha_(Target-Real)"] = dfu[col_target] - dfu[col_real]
+        dfu0[col_target0] = pd.to_numeric(dfu0[col_target0], errors="coerce")
+        dfu0[col_used_real0] = pd.to_numeric(dfu0[col_used_real0], errors="coerce")
+        dfu0["Utilización_%"] = (dfu0[col_used_real0] / dfu0[col_target0]) * 100
+        dfu0["Brecha"] = dfu0[col_target0] - dfu0[col_used_real0]
 
         k1, k2, k3, k4 = st.columns(4)
-        k1.metric("Target prom.", "—" if pd.isna(dfu[col_target].mean()) else f"{dfu[col_target].mean():.1f}")
-        k2.metric("Real prom.", "—" if pd.isna(dfu[col_real].mean()) else f"{dfu[col_real].mean():.1f}")
-        k3.metric("Utilización prom.", "—" if pd.isna(dfu["Utilización_%"].mean()) else f"{dfu['Utilización_%'].mean():.1f}%")
-        k4.metric("Brecha prom.", "—" if pd.isna(dfu["Brecha_(Target-Real)"].mean()) else f"{dfu['Brecha_(Target-Real)'].mean():.1f}")
+        k1.metric("Target prom.", "—" if pd.isna(dfu0[col_target0].mean()) else f"{dfu0[col_target0].mean():.1f}")
+        k2.metric("Usados prom.", "—" if pd.isna(dfu0[col_used_real0].mean()) else f"{dfu0[col_used_real0].mean():.1f}")
+        k3.metric("Utilización prom.", "—" if pd.isna(dfu0["Utilización_%"].mean()) else f"{dfu0['Utilización_%'].mean():.1f}%")
+        k4.metric("Brecha prom.", "—" if pd.isna(dfu0["Brecha"].mean()) else f"{dfu0['Brecha'].mean():.1f}")
 
-        if "Inicio OP" in dfu.columns and dfu["Inicio OP"].notna().any():
-            dfu["Fecha"] = pd.to_datetime(dfu["Inicio OP"], errors="coerce").dt.date
-            g = dfu.groupby("Fecha")[[col_target, col_real]].mean().reset_index()
+        if "Inicio OP" in dfu0.columns and dfu0["Inicio OP"].notna().any():
+            dfu0["Fecha"] = pd.to_datetime(dfu0["Inicio OP"], errors="coerce").dt.date
+            g = dfu0.groupby("Fecha")[[col_target0, col_used_real0]].mean().reset_index()
             st.plotly_chart(
                 px.line(g.melt(id_vars=["Fecha"], var_name="Métrica", value_name="Cantidad"),
                         x="Fecha", y="Cantidad", color="Métrica", markers=True,
-                        title="Target vs Real (promedio por día)"),
+                        title="Target vs Usados (promedio por día)"),
                 use_container_width=True,
-                key=chart_key("tab0_line_target_real")
+                key="tab0_line_target_usados"
             )
 
     st.divider()
 
-    # 3) DM/DE/DO (conteo + HH)
-    st.markdown("### 3) Fallas por tipo (DM / DE / DO)")
-
+    st.markdown("### 3) Fallas por tipo (DM / DE / DO) — frecuencia e impacto (HH)")
     if det_f.empty or "Tipo" not in det_f.columns:
         st.info("No hay detenciones filtradas o falta columna 'Tipo'.")
     else:
@@ -495,19 +479,13 @@ with tab0:
 
         cL, cR = st.columns(2)
         cnt = dfx.groupby("DMDEDO").size().reset_index(name="Cantidad").sort_values("Cantidad", ascending=False)
-        cL.plotly_chart(
-            px.bar(cnt, x="DMDEDO", y="Cantidad", title="Cantidad por DM/DE/DO"),
-            use_container_width=True,
-            key=chart_key("tab0_bar_dm_count")
-        )
+        cL.plotly_chart(px.bar(cnt, x="DMDEDO", y="Cantidad", title="Cantidad por DM/DE/DO"),
+                        use_container_width=True, key="tab0_bar_dm_count")
 
         if "Horas de reparación" in dfx.columns:
             hh = dfx.groupby("DMDEDO")["Horas de reparación"].sum().reset_index().sort_values("Horas de reparación", ascending=False)
-            cR.plotly_chart(
-                px.bar(hh, x="DMDEDO", y="Horas de reparación", title="HH por DM/DE/DO"),
-                use_container_width=True,
-                key=chart_key("tab0_bar_dm_hh")
-            )
+            cR.plotly_chart(px.bar(hh, x="DMDEDO", y="Horas de reparación", title="HH por DM/DE/DO"),
+                            use_container_width=True, key="tab0_bar_dm_hh")
 
 # =========================================================
 # TAB 1: RESUMEN
@@ -519,42 +497,30 @@ with tab1:
 
     if "Clasificación" in det_f.columns and det_f.shape[0] > 0:
         dfc = det_f.groupby("Clasificación", dropna=False).size().reset_index(name="Cantidad").sort_values("Cantidad", ascending=False)
-        colA.plotly_chart(
-            px.bar(dfc, x="Clasificación", y="Cantidad", title="Cantidad de fallas por Clasificación"),
-            use_container_width=True,
-            key=chart_key("tab1_bar_clasif_count")
-        )
+        colA.plotly_chart(px.bar(dfc, x="Clasificación", y="Cantidad", title="Cantidad de fallas por Clasificación"),
+                          use_container_width=True, key="tab1_bar_clasif_count")
 
         if "Horas de reparación" in det_f.columns:
             dfh = det_f.groupby("Clasificación", dropna=False)["Horas de reparación"].sum().reset_index().sort_values("Horas de reparación", ascending=False)
-            colB.plotly_chart(
-                px.bar(dfh, x="Clasificación", y="Horas de reparación", title="HH por Clasificación"),
-                use_container_width=True,
-                key=chart_key("tab1_bar_clasif_hh")
-            )
+            colB.plotly_chart(px.bar(dfh, x="Clasificación", y="Horas de reparación", title="HH por Clasificación"),
+                              use_container_width=True, key="tab1_bar_clasif_hh")
     else:
         st.info("No hay datos de detenciones con los filtros actuales.")
 
     st.subheader("Top 10 equipos por HH")
     if all(c in det_f.columns for c in ["Equipo", "Horas de reparación"]) and det_f.shape[0] > 0:
         top = det_f.groupby("Equipo")["Horas de reparación"].sum().reset_index().sort_values("Horas de reparación", ascending=False).head(10)
-        st.plotly_chart(
-            px.bar(top, x="Equipo", y="Horas de reparación", title="Top 10 equipos por HH"),
-            use_container_width=True,
-            key=chart_key("tab1_bar_top10_hh")
-        )
+        st.plotly_chart(px.bar(top, x="Equipo", y="Horas de reparación", title="Top 10 equipos por HH"),
+                        use_container_width=True, key="tab1_bar_top10_hh")
 
     st.subheader("Tendencia mensual (HH)")
     if "Mes" in det_f.columns and "Horas de reparación" in det_f.columns and det_f.shape[0] > 0:
         m = det_f.groupby("Mes")["Horas de reparación"].sum().reset_index()
-        st.plotly_chart(
-            px.line(m, x="Mes", y="Horas de reparación", markers=True, title="HH por mes"),
-            use_container_width=True,
-            key=chart_key("tab1_line_hh_mes")
-        )
+        st.plotly_chart(px.line(m, x="Mes", y="Horas de reparación", markers=True, title="HH por mes"),
+                        use_container_width=True, key="tab1_line_hh_mes")
 
 # =========================================================
-# TAB 2: DETENCIONES (incluye DM/DE/DO)
+# TAB 2: DETENCIONES
 # =========================================================
 with tab2:
     st.subheader("Detenciones — análisis")
@@ -568,75 +534,60 @@ with tab2:
         df_dm = det_f.copy()
         df_dm["DMDEDO"] = df_dm["Tipo"].apply(map_dmde_do)
 
-        cX, cY = st.columns(2)
+        c1a, c2a = st.columns(2)
         count_dm = df_dm.groupby("DMDEDO").size().reset_index(name="Cantidad").sort_values("Cantidad", ascending=False)
-        cX.plotly_chart(
-            px.bar(count_dm, x="DMDEDO", y="Cantidad", title="Cantidad por DM/DE/DO"),
-            use_container_width=True,
-            key=chart_key("tab2_bar_dm_count")
-        )
+        c1a.plotly_chart(px.bar(count_dm, x="DMDEDO", y="Cantidad", title="Cantidad por DM/DE/DO"),
+                         use_container_width=True, key="tab2_bar_dm_count")
 
         if "Horas de reparación" in df_dm.columns:
             hh_dm = df_dm.groupby("DMDEDO")["Horas de reparación"].sum().reset_index().sort_values("Horas de reparación", ascending=False)
-            cY.plotly_chart(
-                px.bar(hh_dm, x="DMDEDO", y="Horas de reparación", title="HH por DM/DE/DO"),
-                use_container_width=True,
-                key=chart_key("tab2_bar_dm_hh")
-            )
+            c2a.plotly_chart(px.bar(hh_dm, x="DMDEDO", y="Horas de reparación", title="HH por DM/DE/DO"),
+                             use_container_width=True, key="tab2_bar_dm_hh")
 
-            if "Equipo" in df_dm.columns and not df_dm["DMDEDO"].dropna().empty:
-                tipo_sel = st.selectbox(
-                    "Ver Top equipos por HH para",
-                    options=sorted(df_dm["DMDEDO"].dropna().unique()),
-                    key="tab2_select_dm_tipo"
-                )
+            if "Equipo" in df_dm.columns:
+                tipo_opts = sorted([x for x in df_dm["DMDEDO"].dropna().unique()])
+                tipo_sel = st.selectbox("Ver Top equipos por HH para", options=tipo_opts, key="tab2_sel_dm_tipo")
                 sub = df_dm[df_dm["DMDEDO"] == tipo_sel]
                 top_eq = sub.groupby("Equipo")["Horas de reparación"].sum().reset_index().sort_values("Horas de reparación", ascending=False).head(10)
-                st.plotly_chart(
-                    px.bar(top_eq, x="Equipo", y="Horas de reparación", title=f"Top 10 equipos por HH — {tipo_sel}"),
-                    use_container_width=True,
-                    key=chart_key("tab2_bar_top_eq_dm")
-                )
+                st.plotly_chart(px.bar(top_eq, x="Equipo", y="Horas de reparación", title=f"Top 10 equipos por HH — {tipo_sel}"),
+                                use_container_width=True, key="tab2_bar_top10_by_dm")
 
     st.divider()
     st.subheader("Análisis por familia / componente / modo de falla")
 
-    cA, cB = st.columns(2)
+    cA2, cB2 = st.columns(2)
     if all(col in det_f.columns for col in ["Familia Equipo", "Clasificación"]) and det_f.shape[0] > 0:
-        pivot = det_f.pivot_table(index="Familia Equipo", columns="Clasificación", values="Equipo", aggfunc="count", fill_value=0).reset_index()
-        cA.plotly_chart(
-            px.bar(pivot.melt(id_vars=["Familia Equipo"], var_name="Clasificación", value_name="Cantidad"),
-                   x="Familia Equipo", y="Cantidad", color="Clasificación", barmode="stack",
-                   title="Cantidad de fallas por Familia y Clasificación"),
+        pivot = det_f.pivot_table(index="Familia Equipo", columns="Clasificación",
+                                  values="Equipo", aggfunc="count", fill_value=0).reset_index()
+        cA2.plotly_chart(
+            px.bar(
+                pivot.melt(id_vars=["Familia Equipo"], var_name="Clasificación", value_name="Cantidad"),
+                x="Familia Equipo", y="Cantidad", color="Clasificación", barmode="stack",
+                title="Cantidad de fallas por Familia y Clasificación"
+            ),
             use_container_width=True,
-            key=chart_key("tab2_stack_familia_clasif")
+            key="tab2_bar_fam_clasif_stack"
         )
 
     if all(col in det_f.columns for col in ["Equipo", "Clasificación", "Horas de reparación"]) and det_f.shape[0] > 0:
         pe = det_f.groupby(["Equipo", "Clasificación"])["Horas de reparación"].sum().reset_index()
-        cB.plotly_chart(
+        cB2.plotly_chart(
             px.bar(pe, x="Equipo", y="Horas de reparación", color="Clasificación", barmode="stack",
                    title="HH por Equipo y Clasificación"),
             use_container_width=True,
-            key=chart_key("tab2_stack_equipo_clasif_hh")
+            key="tab2_bar_eq_clasif_hh_stack"
         )
 
-    cC, cD = st.columns(2)
+    cC2, cD2 = st.columns(2)
     if "Componente" in det_f.columns and "Horas de reparación" in det_f.columns and det_f.shape[0] > 0:
         comp = det_f.groupby("Componente")["Horas de reparación"].sum().reset_index().sort_values("Horas de reparación", ascending=False).head(15)
-        cC.plotly_chart(
-            px.bar(comp, x="Componente", y="Horas de reparación", title="Top 15 Componentes por HH"),
-            use_container_width=True,
-            key=chart_key("tab2_bar_top_comp")
-        )
+        cC2.plotly_chart(px.bar(comp, x="Componente", y="Horas de reparación", title="Top 15 Componentes por HH"),
+                         use_container_width=True, key="tab2_bar_top_comp_hh")
 
     if "Modo de Falla" in det_f.columns and "Horas de reparación" in det_f.columns and det_f.shape[0] > 0:
         modo = det_f.groupby("Modo de Falla")["Horas de reparación"].sum().reset_index().sort_values("Horas de reparación", ascending=False).head(15)
-        cD.plotly_chart(
-            px.bar(modo, x="Modo de Falla", y="Horas de reparación", title="Top 15 Modos por HH"),
-            use_container_width=True,
-            key=chart_key("tab2_bar_top_modo")
-        )
+        cD2.plotly_chart(px.bar(modo, x="Modo de Falla", y="Horas de reparación", title="Top 15 Modos por HH"),
+                         use_container_width=True, key="tab2_bar_top_modo_hh")
 
     st.subheader("Tabla detenciones filtradas")
     st.dataframe(det_f, use_container_width=True, height=420)
@@ -661,121 +612,188 @@ with tab3:
             else:
                 g = df.groupby("Fecha")["Disp01"].mean().reset_index()
                 fig = px.line(g, x="Fecha", y="Disp01", markers=True, title="Disponibilidad promedio por día")
-            st.plotly_chart(fig, use_container_width=True, key=chart_key("tab3_line_disp_dia"))
+            st.plotly_chart(fig, use_container_width=True, key="tab3_line_disp_dia")
 
-        cA, cB = st.columns(2)
+        cA3, cB3 = st.columns(2)
         if "Buque" in df.columns and "Disponibilidad" in df.columns:
             df["Disp01"] = normalize_disponibilidad_to_0_1(df["Disponibilidad"])
             b = df.groupby("Buque")["Disp01"].mean().reset_index().sort_values("Disp01", ascending=False)
-            cA.plotly_chart(px.bar(b, x="Buque", y="Disp01", title="Disponibilidad promedio por Buque"),
-                            use_container_width=True, key=chart_key("tab3_bar_disp_buque"))
+            cA3.plotly_chart(px.bar(b, x="Buque", y="Disp01", title="Disponibilidad promedio por Buque"),
+                             use_container_width=True, key="tab3_bar_disp_buque")
 
         if "Terminal" in df.columns and "Indisponibilidad [HH]" in df.columns:
             t = df.groupby("Terminal")["Indisponibilidad [HH]"].sum().reset_index().sort_values("Indisponibilidad [HH]", ascending=False)
-            cB.plotly_chart(px.bar(t, x="Terminal", y="Indisponibilidad [HH]", title="Indisponibilidad total [HH] por Terminal"),
-                            use_container_width=True, key=chart_key("tab3_bar_indisp_terminal"))
+            cB3.plotly_chart(px.bar(t, x="Terminal", y="Indisponibilidad [HH]", title="Indisponibilidad total [HH] por Terminal"),
+                             use_container_width=True, key="tab3_bar_indisp_terminal")
 
         st.subheader("Tabla Faena filtrada")
         st.dataframe(faena_f, use_container_width=True, height=420)
 
 # =========================================================
-# TAB U: UTILIZACIÓN (Target vs Real/Utilizados) + Brecha + Matriz
+# TAB U: UTILIZACIÓN COMPLETA (tu modelo)
 # =========================================================
 with tabU:
-    st.subheader("📈 Utilización vs Target (Faena)")
+    st.subheader("📈 Utilización — Demanda vs Oferta vs Capacidad (Faena)")
 
     dfu = faena_f.copy()
-
-    # objetivo: usar "Tractos Utilizados" si existe, si no, caer a "Tractos OP"
-    col_target = find_first_col(dfu, ["Target Operación", "Target Operacion", "Target"])
-    col_used = find_first_col(dfu, ["Tractos Utilizados", "Tractos utilizados"])
-    col_op = find_first_col(dfu, ["Tractos OP", "Tractos Op"])
-
-    col_real = col_used if col_used is not None else col_op
-
-    if dfu.empty or col_target is None or col_real is None:
-        st.info("No hay registros de Faena con los filtros actuales o faltan columnas: 'Target Operación' y ('Tractos Utilizados' o 'Tractos OP').")
+    if dfu.empty:
+        st.info("No hay registros de Faena con los filtros actuales.")
     else:
-        dfu[col_target] = pd.to_numeric(dfu[col_target], errors="coerce")
-        dfu[col_real] = pd.to_numeric(dfu[col_real], errors="coerce")
+        # --- detectar columnas base ---
+        col_target = find_first_col(dfu, ["Target Operación", "Target Operacion", "Target"])
+        col_used = find_first_col(dfu, ["Tractos Utilizados", "Tractos utilizados"])
+        col_op = find_first_col(dfu, ["Tractos OP", "Tractos Op"])
+        col_cap_real = find_first_col(dfu, ["Capacidad_Real", "Capacidad Real"])
+        col_cap_ops = find_first_col(dfu, ["Capacidad_Operadores", "Capacidad Operadores"])
 
-        # UTILIZACIÓN SOLICITADA: usado/target
-        dfu["Utilización_demandada_%"] = (dfu[col_real] / dfu[col_target]) * 100
-        dfu["Brecha_(Target-Usados)"] = dfu[col_target] - dfu[col_real]
+        # Usados reales: preferir Tractos Utilizados; si no existe, usar Tractos OP
+        col_real_used = col_used if col_used is not None else col_op
 
+        # --- detectar si ya existen columnas calculadas (como en tu Excel) ---
+        col_util_dem = find_first_col(dfu, ["Utilizacion_demandada_%", "Utilización_demandada_%"])
+        col_util_oferta = find_first_col(dfu, ["Utilizacion_Oferta_%", "Utilización_Oferta_%"])
+        col_util_cap = find_first_col(dfu, ["Utilizacion_Capacidad_%", "Utilización_Capacidad_%"])
+        col_brecha = find_first_col(dfu, ["Brecha(Target-OP)", "Brecha_(Target-OP)", "Brecha(Target-Usados)", "Brecha_(Target-Usados)"])
+        col_indicador = find_first_col(dfu, ["Indicador_cuello_botella", "Indicador cuello botella", "Indicador_cuello_botella_isponi"])
+
+        # --- asegurar numéricos ---
+        if col_target is not None:
+            dfu[col_target] = pd.to_numeric(dfu[col_target], errors="coerce")
+        if col_real_used is not None:
+            dfu[col_real_used] = pd.to_numeric(dfu[col_real_used], errors="coerce")
+        if col_cap_real is not None:
+            dfu[col_cap_real] = pd.to_numeric(dfu[col_cap_real], errors="coerce")
+        if col_cap_ops is not None:
+            dfu[col_cap_ops] = pd.to_numeric(dfu[col_cap_ops], errors="coerce")
+
+        # --- si no existen, las calculamos aquí ---
+        if col_util_dem is None and (col_target is not None and col_real_used is not None):
+            dfu["Utilizacion_demandada_%"] = (dfu[col_real_used] / dfu[col_target]) * 100
+            col_util_dem = "Utilizacion_demandada_%"
+
+        if col_brecha is None and (col_target is not None and col_real_used is not None):
+            dfu["Brecha(Target-OP)"] = dfu[col_target] - dfu[col_real_used]
+            col_brecha = "Brecha(Target-OP)"
+
+        # Oferta = usados / capacidad_real (tractos disponibles operativos)
+        if col_util_oferta is None and (col_cap_real is not None and col_real_used is not None):
+            dfu["Utilizacion_Oferta_%"] = (dfu[col_real_used] / dfu[col_cap_real]) * 100
+            col_util_oferta = "Utilizacion_Oferta_%"
+
+        # Capacidad = usados / capacidad_operadores
+        if col_util_cap is None and (col_cap_ops is not None and col_real_used is not None):
+            dfu["Utilizacion_Capacidad_%"] = (dfu[col_real_used] / dfu[col_cap_ops]) * 100
+            col_util_cap = "Utilizacion_Capacidad_%"
+
+        # Indicador cuello botella (si no existe)
+        if col_indicador is None:
+            def _cuello(row):
+                try:
+                    tgt = float(row[col_target]) if col_target else None
+                    used = float(row[col_real_used]) if col_real_used else None
+                    capr = float(row[col_cap_real]) if col_cap_real else None
+                    capo = float(row[col_cap_ops]) if col_cap_ops else None
+                except Exception:
+                    return ""
+
+                if tgt is None or used is None or pd.isna(tgt) or pd.isna(used):
+                    return ""
+
+                if used + 1e-9 < tgt:
+                    falta_flota = (capr is not None and (not pd.isna(capr)) and capr + 1e-9 < tgt)
+                    falta_ops = (capo is not None and (not pd.isna(capo)) and capo + 1e-9 < tgt)
+
+                    if falta_ops and falta_flota:
+                        return "FALTA FLOTA + OPERADORES"
+                    if falta_ops:
+                        return "FALTA OPERADORES"
+                    if falta_flota:
+                        return "FALTA FLOTA"
+                    return "COORDINACIÓN / DEMANDA NO CUBIERTA"
+
+                return "BALANCEADO"
+
+            dfu["Indicador_cuello_botella"] = dfu.apply(_cuello, axis=1)
+            col_indicador = "Indicador_cuello_botella"
+
+        # --- KPIs ---
         k1, k2, k3, k4 = st.columns(4)
-        k1.metric("Target promedio", "—" if pd.isna(dfu[col_target].mean()) else f"{dfu[col_target].mean():.1f}")
-        k2.metric("Real usado promedio", "—" if pd.isna(dfu[col_real].mean()) else f"{dfu[col_real].mean():.1f}")
-        k3.metric("Utilización (Usados/Target)", "—" if pd.isna(dfu["Utilización_demandada_%"].mean()) else f"{dfu['Utilización_demandada_%'].mean():.1f}%")
-        k4.metric("Brecha promedio (Target-Usados)", "—" if pd.isna(dfu["Brecha_(Target-Usados)"].mean()) else f"{dfu['Brecha_(Target-Usados)'].mean():.1f}")
+
+        def _mean(colname):
+            if colname is None or colname not in dfu.columns:
+                return None
+            v = pd.to_numeric(dfu[colname], errors="coerce").mean()
+            return None if pd.isna(v) else float(v)
+
+        m_dem = _mean(col_util_dem)
+        m_ofer = _mean(col_util_oferta)
+        m_cap = _mean(col_util_cap)
+        m_bre = _mean(col_brecha)
+
+        k1.metric("Utilización demandada (Usados/Target)", "—" if m_dem is None else f"{m_dem:.1f}%")
+        k2.metric("Utilización oferta (Usados/Cap. Real)", "—" if m_ofer is None else f"{m_ofer:.1f}%")
+        k3.metric("Utilización capacidad (Usados/Cap. Operadores)", "—" if m_cap is None else f"{m_cap:.1f}%")
+        k4.metric("Brecha promedio (Target − Usados)", "—" if m_bre is None else f"{m_bre:.2f}")
 
         st.divider()
 
-        # Target vs usados por día
-        if "Inicio OP" in dfu.columns and dfu["Inicio OP"].notna().any():
+        # 1) Target vs Usados por día
+        if "Inicio OP" in dfu.columns and dfu["Inicio OP"].notna().any() and col_target and col_real_used:
             dfu["Fecha"] = pd.to_datetime(dfu["Inicio OP"], errors="coerce").dt.date
-            g = dfu.groupby("Fecha")[[col_target, col_real]].mean().reset_index()
+            g = dfu.groupby("Fecha")[[col_target, col_real_used]].mean().reset_index()
             st.plotly_chart(
-                px.line(g.melt(id_vars=["Fecha"], var_name="Métrica", value_name="Cantidad"),
-                        x="Fecha", y="Cantidad", color="Métrica", markers=True,
-                        title="Target Operación vs Real usado (promedio por día)"),
+                px.line(
+                    g.melt(id_vars=["Fecha"], var_name="Métrica", value_name="Cantidad"),
+                    x="Fecha", y="Cantidad", color="Métrica", markers=True,
+                    title="Target Operación vs Tractos usados (promedio por día)"
+                ),
                 use_container_width=True,
-                key=chart_key("tabU_line_target_used")
+                key="tabU_line_target_used"
             )
 
-        # Utilización % por Terminal / Buque
-        cA, cB = st.columns(2)
+        # 2) Utilizaciones por Terminal (barras agrupadas)
         if "Terminal" in dfu.columns:
-            gt = dfu.groupby("Terminal")["Utilización_demandada_%"].mean().reset_index().sort_values("Utilización_demandada_%", ascending=False)
-            cA.plotly_chart(px.bar(gt, x="Terminal", y="Utilización_demandada_%", title="Utilización % (Usados/Target) por Terminal"),
-                            use_container_width=True, key=chart_key("tabU_bar_util_terminal"))
+            metrics = []
+            if col_util_dem: metrics.append(col_util_dem)
+            if col_util_oferta: metrics.append(col_util_oferta)
+            if col_util_cap: metrics.append(col_util_cap)
 
-        if "Buque" in dfu.columns:
-            gb = dfu.groupby("Buque")["Utilización_demandada_%"].mean().reset_index().sort_values("Utilización_demandada_%", ascending=False)
-            cB.plotly_chart(px.bar(gb, x="Buque", y="Utilización_demandada_%", title="Utilización % (Usados/Target) por Buque"),
-                            use_container_width=True, key=chart_key("tabU_bar_util_buque"))
+            if metrics:
+                gt = dfu.groupby("Terminal")[metrics].mean().reset_index()
+                melt = gt.melt(id_vars=["Terminal"], var_name="Métrica", value_name="Porcentaje")
+                st.plotly_chart(
+                    px.bar(melt, x="Terminal", y="Porcentaje", color="Métrica", barmode="group",
+                           title="Utilizaciones promedio por Terminal"),
+                    use_container_width=True,
+                    key="tabU_bar_utils_terminal"
+                )
 
-        st.divider()
-        st.subheader("📌 Matriz Disponibilidad vs Utilización (Usados/Target)")
-
-        if "Disponibilidad" in dfu.columns:
-            tmp = dfu.copy()
-            tmp["Disp_%"] = normalize_disponibilidad_to_0_1(tmp["Disponibilidad"]) * 100
-            fig_mat = px.scatter(
-                tmp,
-                x="Disp_%",
-                y="Utilización_demandada_%",
-                color="Terminal" if "Terminal" in tmp.columns else None,
-                size=pd.to_numeric(tmp[col_target], errors="coerce"),
-                hover_data=[c for c in ["Buque", "Inicio OP", col_target, col_real, "Brecha_(Target-Usados)"] if c in tmp.columns],
-                title="Disponibilidad (%) vs Utilización (%)"
-            )
-            fig_mat.add_hline(y=95, line_dash="dash")
-            fig_mat.add_vline(x=90, line_dash="dash")
-            st.plotly_chart(fig_mat, use_container_width=True, key=chart_key("tabU_scatter_disp_util"))
-            st.caption("Abajo derecha = baja disponibilidad pero operación exige; Arriba izquierda = disponibilidad OK pero baja utilización; Arriba derecha = situación controlada; Abajo izquierda = problema estructural.")
-
-        st.divider()
-        st.subheader("📉 Top 10 días con mayor brecha (Target − Usados)")
-
-        if "Inicio OP" in dfu.columns and dfu["Inicio OP"].notna().any():
-            tmpb = dfu.copy()
-            tmpb["Fecha"] = pd.to_datetime(tmpb["Inicio OP"], errors="coerce").dt.date
-            gb = tmpb.groupby("Fecha")["Brecha_(Target-Usados)"].mean().reset_index().sort_values("Brecha_(Target-Usados)", ascending=False).head(10)
+        # 3) Cuello de botella (conteo)
+        if col_indicador and col_indicador in dfu.columns:
+            bott = dfu.groupby(col_indicador).size().reset_index(name="Cantidad").sort_values("Cantidad", ascending=False)
             st.plotly_chart(
-                px.bar(gb, x="Fecha", y="Brecha_(Target-Usados)", title="Top 10 días con mayor brecha (promedio por día)"),
+                px.bar(bott, x=col_indicador, y="Cantidad", title="Indicador de cuello de botella (conteo)"),
                 use_container_width=True,
-                key=chart_key("tabU_bar_top_brecha")
+                key="tabU_bar_bottleneck"
             )
 
-        st.subheader("Tabla Utilización (Faena) filtrada")
-        cols_show = [c for c in [
+        st.divider()
+        st.subheader("Tabla de utilización (gestión)")
+
+        cols_show = []
+        for c in [
             "Inicio OP", "Terminal", "Buque",
-            col_target, col_real,
-            "Utilización_demandada_%", "Brecha_(Target-Usados)",
+            col_target, col_real_used,
+            col_cap_real, col_cap_ops,
+            col_util_dem, col_util_oferta, col_util_cap,
+            col_brecha,
+            col_indicador,
             "Disponibilidad"
-        ] if c in dfu.columns]
-        st.dataframe(dfu[cols_show], use_container_width=True, height=420)
+        ]:
+            if c and c in dfu.columns and c not in cols_show:
+                cols_show.append(c)
+
+        st.dataframe(dfu[cols_show], use_container_width=True, height=480)
 
 # =========================================================
 # TAB 4: EXPORT
@@ -783,13 +801,15 @@ with tabU:
 with tab4:
     st.subheader("Exportar datos filtrados")
 
-    cA, cB = st.columns(2)
-    with cA:
+    cA4, cB4 = st.columns(2)
+    with cA4:
         csv_det = det_f.to_csv(index=False).encode("utf-8")
-        st.download_button("⬇️ Descargar Detenciones (CSV)", data=csv_det, file_name="detenciones_filtradas.csv", mime="text/csv")
-    with cB:
+        st.download_button("⬇️ Descargar Detenciones (CSV)", data=csv_det,
+                           file_name="detenciones_filtradas.csv", mime="text/csv")
+    with cB4:
         csv_faena = faena_f.to_csv(index=False).encode("utf-8")
-        st.download_button("⬇️ Descargar Faena (CSV)", data=csv_faena, file_name="faena_filtrada.csv", mime="text/csv")
+        st.download_button("⬇️ Descargar Faena (CSV)", data=csv_faena,
+                           file_name="faena_filtrada.csv", mime="text/csv")
 
     st.caption("Si actualizas los Google Sheets, el dashboard se actualiza solo con el refresco configurado.")
 
