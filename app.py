@@ -338,6 +338,81 @@ with tab2:
 
     st.subheader("Tabla de detenciones filtradas")
     st.dataframe(det_f, use_container_width=True, height=420)
+        st.divider()
+    st.subheader("📌 DM / DE / DO — Conteo y HH")
+
+    # Elegir columna de clasificación (según tu Excel)
+    class_col = None
+    for cand in ["Clasificación", "Tipo", "Clasificacion", "CLASIFICACION"]:
+        if cand in det_f.columns:
+            class_col = cand
+            break
+
+    if class_col is None:
+        st.info("No encontré columna de clasificación (ej: 'Clasificación' o 'Tipo') para armar DM/DE/DO.")
+    else:
+        df_dm = det_f.copy()
+
+        # Normalizar a DM/DE/DO si el texto lo permite
+        def map_dmde_do(x):
+            if pd.isna(x):
+                return "SIN CLASIFICAR"
+            s = str(x).strip().upper()
+            # Si ya viene como DM/DE/DO:
+            if s in ["DM", "DE", "DO"]:
+                return s
+            # Si viene como texto:
+            if "MEC" in s:
+                return "DM"
+            if "ELEC" in s or "ELÉC" in s:
+                return "DE"
+            if "OPER" in s:
+                return "DO"
+            # Si no coincide, lo dejamos como está para que no invente
+            return s
+
+        df_dm["DMDEDO"] = df_dm[class_col].apply(map_dmde_do)
+
+        # Conteo
+        count_dm = (
+            df_dm.groupby("DMDEDO", dropna=False)
+            .size()
+            .reset_index(name="Cantidad")
+            .sort_values("Cantidad", ascending=False)
+        )
+
+        fig_count = px.bar(
+            count_dm,
+            x="DMDEDO",
+            y="Cantidad",
+            title=f"Cantidad de detenciones por DM/DE/DO (columna: {class_col})"
+        )
+        st.plotly_chart(fig_count, use_container_width=True)
+
+        # HH por tipo (si existe la columna)
+        if "Horas de reparación" in df_dm.columns:
+            hh_dm = (
+                df_dm.groupby("DMDEDO", dropna=False)["Horas de reparación"]
+                .sum()
+                .reset_index()
+                .sort_values("Horas de reparación", ascending=False)
+            )
+
+            fig_hh = px.bar(
+                hh_dm,
+                x="DMDEDO",
+                y="Horas de reparación",
+                title="Horas de detención (HH) por DM/DE/DO"
+            )
+            st.plotly_chart(fig_hh, use_container_width=True)
+
+        # % de participación (para lectura ejecutiva)
+        total = count_dm["Cantidad"].sum()
+        if total > 0:
+            share = count_dm.copy()
+            share["%"] = (share["Cantidad"] / total) * 100
+            st.dataframe(share, use_container_width=True, height=220)
+
 
 # -------- TAB 3: DISPONIBILIDAD (FAENA)
 with tab3:
