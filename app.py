@@ -226,7 +226,7 @@ st.divider()
 # ======================================
 # TABS
 # ======================================
-tab1, tab2, tab3, tab4 = st.tabs(["📌 Resumen", "🛑 Detenciones", "✅ Disponibilidad (Faena)", "📁 Datos"])
+tab1, tab2, tab3, tabU, tab4 = st.tabs(["📌 Resumen", "🛑 Detenciones", "✅ Disponibilidad (Faena)", "📈 Utilización", "📁 Datos"])
 
 # -------- TAB 1: RESUMEN
 with tab1:
