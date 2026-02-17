@@ -39,6 +39,26 @@ def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [re.sub(r"\s+", " ", str(c)).strip() for c in df.columns]
     return df
+    
+def _make_unique_columns(cols):
+    """
+    Fuerza nombres de columnas únicos:
+    Observacion, Observacion__2, Observacion__3 ...
+    """
+    seen = {}
+    out = []
+    for c in cols:
+        base = str(c).strip()
+        if base == "" or base.lower() == "nan":
+            base = "COL"
+        if base not in seen:
+            seen[base] = 1
+            out.append(base)
+        else:
+            seen[base] += 1
+            out.append(f"{base}__{seen[base]}")
+    return out
+
 
 def _to_datetime(df: pd.DataFrame, cols):
     df = df.copy()
@@ -149,12 +169,53 @@ def load_main() -> tuple[pd.DataFrame, pd.DataFrame]:
 
 @st.cache_data(ttl=DEFAULT_REFRESH_SEC, show_spinner=False)
 def load_estado() -> pd.DataFrame:
+    """
+    Lee Estado_Flota aunque tenga filas de título arriba (celdas combinadas)
+    y aunque existan encabezados duplicados.
+    """
     content = download_google_xlsx(ESTADO_URL)
-    df = pd.read_excel(io.BytesIO(content), sheet_name=SHEET_ESTADO)
+
+    # Leer crudo sin header
+    raw = pd.read_excel(io.BytesIO(content), sheet_name=SHEET_ESTADO, header=None)
+    raw = raw.dropna(how="all").fillna("")
+
+    # Detectar fila header: debe contener TRACTO/#TRACTO y STATUS y UBIC
+    def _row_text(i):
+        return " | ".join([str(x).strip().lower() for x in raw.iloc[i].tolist()])
+
+    header_idx = None
+    for i in range(min(len(raw), 60)):
+        txt = _row_text(i)
+        ok_tracto = ("tracto" in txt)  # cubre '#Tracto' o 'Tracto'
+        ok_status = ("status" in txt)
+        ok_ubic = ("ubic" in txt)      # cubre 'Ubicación'/'Ubicacion'
+        if ok_tracto and ok_status:
+            header_idx = i
+            # si además viene ubic, mejor, pero no obligamos
+            break
+
+    # Si no detecta, fallback normal
+    if header_idx is None:
+        df = pd.read_excel(io.BytesIO(content), sheet_name=SHEET_ESTADO)
+        df = _normalize_cols(df)
+        df.columns = _make_unique_columns(df.columns)
+        return df.dropna(how="all")
+
+    # Construir DF con esa fila como encabezados
+    hdr = raw.iloc[header_idx].tolist()
+    df = raw.iloc[header_idx + 1:].copy()
+    df.columns = hdr
+    df = df.dropna(how="all")
     df = _normalize_cols(df)
-    for c in df.columns:
-        if df[c].dtype == "object":
-            df[c] = df[c].astype(str).str.strip()
+
+    # Columnas únicas (evita el error dtype por duplicados)
+    df.columns = _make_unique_columns(df.columns)
+
+    # Limpiar strings SIN usar df[col].dtype (para evitar choque con duplicados)
+    for j in range(df.shape[1]):
+        if df.iloc[:, j].dtype == "object":
+            df.iloc[:, j] = df.iloc[:, j].astype(str).str.strip()
+
     return df
 
 # =========================================================
@@ -293,13 +354,16 @@ with tab0:
         st.code(str(e))
         estado = pd.DataFrame()
 
-    # Tus encabezados reales
-    col_tracto = find_first_col(estado, ["Tracto"])
-    col_status = find_first_col(estado, ["Status"])
-    col_ubic = find_first_col(estado, ["Ubicación", "Ubicacion"])
-    col_causa = find_first_col(estado, ["Causa"])
-    col_fprop = find_first_col(estado, ["F.Propuesta", "F Propuesta", "Fecha Propuesta"])
-    col_obs = find_first_col(estado, ["Observacion", "Observación", "Observacion "])
+ # Soporta '#Tracto' o 'Tracto' (y variantes)
+col_tracto = find_first_col(estado, ["#Tracto", "Tracto", "# Tracto", "TRACTO"])
+col_status = find_first_col(estado, ["Status", "STATUS"])
+col_ubic = find_first_col(estado, ["Ubicación", "Ubicacion", "UBICACIÓN", "UBICACION"])
+
+# opcionales
+col_causa = find_first_col(estado, ["Causa", "CAUSA"])
+col_fprop = find_first_col(estado, ["F.Propuesta", "F Propuesta", "F. Propuesta", "FPROPUESTA"])
+col_obs = find_first_col(estado, ["Observacion", "Observación", "OBSERVACION", "OBSERVACIÓN"])
+
 
     if estado.empty or col_tracto is None or col_status is None:
         st.info("Para la portada necesito columnas en Estado_Flota: 'Tracto' y 'Status'.")
