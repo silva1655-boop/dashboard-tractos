@@ -222,6 +222,67 @@ with c4:
         kpi_card("Disponibilidad promedio", f"{disp_prom*100:,.1f}%".replace(",", "X").replace(".", ",").replace("X", "."))
 
 st.divider()
+        st.divider()
+        st.subheader("📊 Índice Operacional (Disponibilidad × Cumplimiento)")
+
+        if "Disponibilidad" in dfu.columns:
+            dfu["Disponibilidad"] = pd.to_numeric(dfu["Disponibilidad"], errors="coerce")
+            dfu["Indice_Operacional_%"] = (dfu["Disponibilidad"] * dfu["Cumplimiento_%"])
+
+            ind_prom = dfu["Indice_Operacional_%"].mean()
+
+            st.metric("Índice Operacional Promedio", 
+                      "—" if pd.isna(ind_prom) else f"{ind_prom:.1f}%")
+
+            fig_ind = px.line(
+                dfu,
+                x="Inicio OP" if "Inicio OP" in dfu.columns else dfu.index,
+                y="Indice_Operacional_%",
+                title="Evolución Índice Operacional"
+            )
+            st.plotly_chart(fig_ind, use_container_width=True)
+        st.divider()
+        st.subheader("📌 Matriz Disponibilidad vs Cumplimiento")
+
+        if "Disponibilidad" in dfu.columns:
+            fig_mat = px.scatter(
+                dfu,
+                x="Disponibilidad",
+                y="Cumplimiento_%",
+                color="Terminal" if "Terminal" in dfu.columns else None,
+                size=dfu[col_target],
+                hover_data=["Buque"] if "Buque" in dfu.columns else None,
+                title="Disponibilidad vs Cumplimiento"
+            )
+
+            fig_mat.add_hline(y=95, line_dash="dash")
+            fig_mat.add_vline(x=90, line_dash="dash")
+
+            st.plotly_chart(fig_mat, use_container_width=True)
+
+            st.caption("""
+Cuadrantes:
+- Arriba derecha → Operación exigente pero flota responde
+- Arriba izquierda → Taller responde, operación no usa
+- Abajo izquierda → Problema estructural
+- Abajo derecha → Operación forzando flota
+""")
+        st.divider()
+        st.subheader("📉 Pareto de días con mayor brecha")
+
+        if "Inicio OP" in dfu.columns:
+            dfu_sorted = dfu.sort_values("Brecha_(Target-OP)", ascending=False)
+
+            top_brecha = dfu_sorted.head(10)
+
+            fig_pareto = px.bar(
+                top_brecha,
+                x="Inicio OP",
+                y="Brecha_(Target-OP)",
+                title="Top 10 días con mayor brecha (Target - OP)"
+            )
+            st.plotly_chart(fig_pareto, use_container_width=True)
+
 
 # ======================================
 # TABS
