@@ -359,6 +359,91 @@ with tab3:
 
         st.subheader("Tabla Faena filtrada")
         st.dataframe(faena_f, use_container_width=True, height=420)
+with tabU:
+    st.subheader("📈 Utilización vs Target (Faena)")
+
+    dfu = faena_f.copy()
+
+    # Nombres esperados (según tu Excel)
+    col_target = "Target Operación"
+    col_op = "Tractos OP"
+
+    # Si por algún motivo vienen con espacios/diferencias, intentamos encontrarlas igual
+    def find_col(df, wanted):
+        if wanted in df.columns:
+            return wanted
+        w = wanted.strip().lower()
+        for c in df.columns:
+            if str(c).strip().lower() == w:
+                return c
+        return None
+
+    col_target = find_col(dfu, col_target)
+    col_op = find_col(dfu, col_op)
+
+    if dfu.shape[0] == 0:
+        st.info("No hay registros de Faena con los filtros actuales.")
+    elif (col_target is None) or (col_op is None):
+        st.error("No encontré las columnas necesarias en 'Faena'.")
+        st.write("Columnas encontradas:", list(dfu.columns))
+        st.stop()
+    else:
+        # Asegurar numérico
+        dfu[col_target] = pd.to_numeric(dfu[col_target], errors="coerce")
+        dfu[col_op] = pd.to_numeric(dfu[col_op], errors="coerce")
+
+        # Cálculos
+        dfu["Cumplimiento_%"] = (dfu[col_op] / dfu[col_target]) * 100
+        dfu["Brecha_(Target-OP)"] = dfu[col_target] - dfu[col_op]
+
+        # KPIs
+        k1, k2, k3, k4 = st.columns(4)
+        target_avg = dfu[col_target].mean()
+        op_avg = dfu[col_op].mean()
+        cum_avg = dfu["Cumplimiento_%"].mean()
+        brecha_avg = dfu["Brecha_(Target-OP)"].mean()
+
+        k1.metric("Target promedio", "—" if pd.isna(target_avg) else f"{target_avg:.1f}")
+        k2.metric("Tractos OP promedio", "—" if pd.isna(op_avg) else f"{op_avg:.1f}")
+        k3.metric("Cumplimiento promedio", "—" if pd.isna(cum_avg) else f"{cum_avg:.1f}%")
+        k4.metric("Brecha promedio (Target - OP)", "—" if pd.isna(brecha_avg) else f"{brecha_avg:.1f}")
+
+        st.divider()
+
+        # Gráfico 1: Target vs Tractos OP (por fecha si existe Inicio OP)
+        if "Inicio OP" in dfu.columns and dfu["Inicio OP"].notna().any():
+            dfu["Fecha"] = pd.to_datetime(dfu["Inicio OP"], errors="coerce").dt.date
+            g = dfu.groupby(["Fecha"], dropna=False)[[col_target, col_op]].mean().reset_index()
+
+            fig = px.line(
+                g.melt(id_vars=["Fecha"], var_name="Métrica", value_name="Cantidad"),
+                x="Fecha", y="Cantidad", color="Métrica", markers=True,
+                title="Target Operación vs Tractos OP (promedio por día)"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            # Si no hay fecha, mostramos un resumen global
+            g = pd.DataFrame({
+                "Métrica": ["Target Operación", "Tractos OP"],
+                "Cantidad": [dfu[col_target].mean(), dfu[col_op].mean()]
+            })
+            fig = px.bar(g, x="Métrica", y="Cantidad", title="Target Operación vs Tractos OP (promedio)")
+            st.plotly_chart(fig, use_container_width=True)
+
+        # Gráfico 2: Cumplimiento % por Terminal / Buque si existen
+        c1, c2 = st.columns(2)
+
+        if "Terminal" in dfu.columns:
+            gt = dfu.groupby("Terminal")["Cumplimiento_%"].mean().reset_index().sort_values("Cumplimiento_%", ascending=False)
+            c1.plotly_chart(px.bar(gt, x="Terminal", y="Cumplimiento_%", title="Cumplimiento % promedio por Terminal"), use_container_width=True)
+
+        if "Buque" in dfu.columns:
+            gb = dfu.groupby("Buque")["Cumplimiento_%"].mean().reset_index().sort_values("Cumplimiento_%", ascending=False)
+            c2.plotly_chart(px.bar(gb, x="Buque", y="Cumplimiento_%", title="Cumplimiento % promedio por Buque"), use_container_width=True)
+
+        st.subheader("Tabla Utilización (Faena) filtrada")
+        cols_show = [c for c in ["Inicio OP", "Terminal", "Buque", col_target, col_op, "Cumplimiento_%", "Brecha_(Target-OP)", "Disponibilidad"] if c in dfu.columns]
+        st.dataframe(dfu[cols_show], use_container_width=True, height=420)
 
 # -------- TAB 4: DATOS / EXPORT
 with tab4:
