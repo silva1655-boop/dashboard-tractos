@@ -349,6 +349,10 @@ with tab0:
 
     # 1) Estado actual de flota
     st.markdown("### 1) Estado actual de flota (hoy)")
+
+    # KPIs del estado (hay que definir columnas antes de usarlas)
+    cA, cB, cC, cD = st.columns(4)
+
     try:
         estado = load_estado()
         estado = _normalize_cols(estado)
@@ -357,31 +361,36 @@ with tab0:
         st.code(str(e))
         estado = pd.DataFrame()
 
-  # Soporta '#Tracto' o 'Tracto' (y variantes)
-col_tracto = find_first_col(estado, ["#Tracto", "Tracto", "# Tracto", "TRACTO"])
-col_status = find_first_col(estado, ["Status", "STATUS"])
-col_ubic = find_first_col(estado, ["Ubicación", "Ubicacion", "UBICACIÓN", "UBICACION"])
+    # ---- Detectar columnas (DENTRO del tab, con indent correcto) ----
+    col_tracto = find_first_col(estado, ["#Tracto", "Tracto", "# Tracto", "TRACTO"])
+    col_status = find_first_col(estado, ["Status", "STATUS"])
+    col_ubic = find_first_col(estado, ["Ubicación", "Ubicacion", "UBICACIÓN", "UBICACION"])
 
-# opcionales
-col_causa = find_first_col(estado, ["Causa", "CAUSA"])
-col_fprop = find_first_col(estado, ["F.Propuesta", "F Propuesta", "F. Propuesta", "FPROPUESTA"])
-col_obs = find_first_col(estado, ["Observacion", "Observación", "OBSERVACION", "OBSERVACIÓN"])
-
+    col_causa = find_first_col(estado, ["Causa", "CAUSA"])
+    col_fprop = find_first_col(estado, ["F.Propuesta", "F Propuesta", "F. Propuesta", "FPROPUESTA"])
+    col_obs = find_first_col(estado, ["Observacion", "Observación", "OBSERVACION", "OBSERVACIÓN"])
 
     if estado.empty or col_tracto is None or col_status is None:
         cA.metric("Flota (hoy)", "—")
         cB.metric("Operativos (hoy)", "—")
         cC.metric("No operativos (hoy)", "—")
         cD.metric("Disponibilidad (hoy)", "—")
-        st.info("Para la portada necesito columnas en Estado_Flota: Tracto y Status/Estado.")
+        st.info("Para la portada necesito columnas en Estado_Flota: '#Tracto/Tracto' y 'Status'.")
+        st.write("Columnas detectadas:", list(estado.columns) if not estado.empty else "—")
     else:
         dfE = estado.copy()
+
+        # Asegurar texto
         dfE[col_status] = dfE[col_status].astype(str).str.upper().str.strip()
         dfE[col_tracto] = dfE[col_tracto].astype(str).str.strip()
 
+        if col_ubic is not None and col_ubic in dfE.columns:
+            dfE[col_ubic] = dfE[col_ubic].astype(str).str.strip()
+
+        # Clasificación operativo
         dfE["_operativo"] = dfE[col_status].apply(is_operativo_status)
 
-        total_f = dfE[col_tracto].nunique()
+        total_f = int(dfE[col_tracto].nunique())
         op_f = int(dfE[dfE["_operativo"]][col_tracto].nunique())
         no_op_f = max(total_f - op_f, 0)
         disp_hoy = (op_f / total_f) if total_f else None
@@ -392,27 +401,29 @@ col_obs = find_first_col(estado, ["Observacion", "Observación", "OBSERVACION", 
         cD.metric("Disponibilidad (hoy)", "—" if disp_hoy is None else f"{disp_hoy*100:,.1f}%".replace(",", "X").replace(".", ",").replace("X", "."))
 
         pie_df = pd.DataFrame({"Estado": ["Operativos", "No operativos"], "Cantidad": [op_f, no_op_f]})
-        st.plotly_chart(px.pie(pie_df, names="Estado", values="Cantidad", title="Flota hoy (Operativos vs No operativos)"),
-                        use_container_width=True)
+        st.plotly_chart(
+            px.pie(pie_df, names="Estado", values="Cantidad", title="Flota hoy (Operativos vs No operativos)"),
+            use_container_width=True
+        )
 
-        # Resumen por ubicación (si existe)
-        if col_ubic is not None:
-            st.markdown("#### Disponibilidad hoy por ubicación")
-            grp = dfE.groupby(col_ubic)["_operativo"].agg(Total="size", Operativos="sum").reset_index()
-            grp["Disponibilidad_%"] = (grp["Operativos"] / grp["Total"]) * 100
-            st.plotly_chart(px.bar(grp.sort_values("Disponibilidad_%", ascending=False),
-                                   x=col_ubic, y="Disponibilidad_%", title="Disponibilidad (%) por ubicación"),
-                            use_container_width=True)
+        # Resumen por ubicación
+        if col_ubic is not None and col_ubic in dfE.columns:
+            st.markdown("#### Operativos por ubicación (hoy)")
+            op_by_loc = dfE[dfE["_operativo"]].groupby(col_ubic)[col_tracto].nunique().reset_index(name="Operativos")
+            st.plotly_chart(
+                px.bar(op_by_loc.sort_values("Operativos", ascending=False),
+                       x=col_ubic, y="Operativos", title="Operativos por ubicación"),
+                use_container_width=True
+            )
 
-        # Lista corta de no operativos (lo más accionable)
-        st.markdown("#### No operativos (top para gestión)")
-        cols_show = [c for c in [col_tracto, col_status, col_ubic, "Causa", "Observación", "Observacion"] if c in dfE.columns]
-        if cols_show:
-            st.dataframe(dfE[~dfE["_operativo"]][cols_show].head(30), use_container_width=True, height=280)
+        # Tabla No operativos (incluye fuera de servicio)
+        st.markdown("#### 🛑 No operativos (para gestión)")
+        cols_show = [c for c in [col_tracto, col_status, col_ubic, col_causa, col_fprop, col_obs] if c is not None and c in dfE.columns]
+        st.dataframe(dfE[~dfE["_operativo"]][cols_show].head(50), use_container_width=True, height=320)
 
     st.divider()
 
-    # 2) Utilización (Target vs Real) - resumen mínimo
+    # 2) Utilización (Target vs Real) - resumen mínimo (tal cual lo tenías)
     st.markdown("### 2) Cumplimiento operacional (Utilización: Real / Target)")
     dfu = faena_f.copy()
     col_target = find_first_col(dfu, ["Target Operación", "Target Operacion", "Target"])
@@ -432,17 +443,6 @@ col_obs = find_first_col(estado, ["Observacion", "Observación", "OBSERVACION", 
         k3.metric("Utilización prom.", f"{dfu['Utilización_%'].mean():.1f}%")
         k4.metric("Brecha prom. (Target-Real)", f"{dfu['Brecha'].mean():.1f}")
 
-        # semáforo simple
-        util_avg = dfu["Utilización_%"].mean()
-        if pd.notna(util_avg):
-            if util_avg >= 95:
-                st.success(f"Semáforo utilización: VERDE ({util_avg:.1f}%)")
-            elif util_avg >= 85:
-                st.warning(f"Semáforo utilización: AMARILLO ({util_avg:.1f}%)")
-            else:
-                st.error(f"Semáforo utilización: ROJO ({util_avg:.1f}%)")
-
-        # gráfico mínimo
         if "Inicio OP" in dfu.columns and dfu["Inicio OP"].notna().any():
             dfu["Fecha"] = pd.to_datetime(dfu["Inicio OP"], errors="coerce").dt.date
             g = dfu.groupby("Fecha")[[col_target, col_op]].mean().reset_index()
@@ -455,7 +455,7 @@ col_obs = find_first_col(estado, ["Observacion", "Observación", "OBSERVACION", 
 
     st.divider()
 
-    # 3) Fallas DM / DE / DO (impacto)
+    # 3) Fallas DM / DE / DO
     st.markdown("### 3) Fallas por tipo (DM / DE / DO) — frecuencia e impacto (HH)")
     if det_f.empty or "Tipo" not in det_f.columns:
         st.info("No hay detenciones filtradas o falta columna 'Tipo' en Detenciones.")
@@ -471,14 +471,6 @@ col_obs = find_first_col(estado, ["Observacion", "Observación", "OBSERVACION", 
             hh = dfx.groupby("DMDEDO")["Horas de reparación"].sum().reset_index().sort_values("Horas de reparación", ascending=False)
             cR.plotly_chart(px.bar(hh, x="DMDEDO", y="Horas de reparación", title="HH por DM/DE/DO"), use_container_width=True)
 
-    # 4) Índice de Salud Operacional (confiabilidad + operación)
-    st.divider()
-    st.markdown("### 4) Índice de salud operacional (Disponibilidad × Utilización)")
-    # Disponibilidad hoy (estado) * utilización promedio (histórico filtrado)
-    if ("dfE" in locals()) and (not estado.empty) and (disp_hoy is not None) and (not dfu.empty) and ("Utilización_%" in dfu.columns):
-        salud = (disp_hoy * 100) * (dfu["Utilización_%"].mean() / 100.0)  # resultado en %
-        st.metric("Salud Operacional (%)", f"{salud:.1f}%")
-        st.caption("Interpretación: combina capacidad técnica (hoy) × cumplimiento operacional (periodo filtrado).")
 
 # =========================================================
 # TAB 1: RESUMEN (histórico)
