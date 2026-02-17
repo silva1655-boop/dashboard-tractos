@@ -122,6 +122,13 @@ def is_valid_tracto_code(x: str) -> bool:
     if re.match(r"^[A-Z]{1,4}\s?\d{1,4}$", s):
         return True
     return False
+    
+def percent_to_0_100(series: pd.Series) -> pd.Series:
+    s = pd.to_numeric(series, errors="coerce")
+    if s.notna().any() and s.max() <= 1.5:
+        return s * 100.0
+    return s
+
 
 # =========================================================
 # LOADERS
