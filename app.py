@@ -338,7 +338,8 @@ with tab2:
 
     st.subheader("Tabla de detenciones filtradas")
     st.dataframe(det_f, use_container_width=True, height=420)
-        st.divider()
+    
+    st.divider()
     st.subheader("📌 DM / DE / DO — Conteo y HH")
 
     # Elegir columna de clasificación (según tu Excel)
