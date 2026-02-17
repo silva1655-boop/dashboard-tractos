@@ -340,41 +340,37 @@ with tab2:
     st.dataframe(det_f, use_container_width=True, height=420)
     
     st.divider()
-    st.subheader("📌 DM / DE / DO — Conteo y HH")
+    st.subheader("📌 DM / DE / DO — Detenciones (columna: Tipo)")
 
-    # Elegir columna de clasificación (según tu Excel)
-    class_col = None
-    for cand in ["Clasificación", "Tipo", "Clasificacion", "CLASIFICACION"]:
-        if cand in det_f.columns:
-            class_col = cand
-            break
-
-    if class_col is None:
-        st.info("No encontré columna de clasificación (ej: 'Clasificación' o 'Tipo') para armar DM/DE/DO.")
+    if "Tipo" not in det_f.columns:
+        st.info("No existe la columna 'Tipo' en Detenciones (revisa el nombre exacto).")
     else:
         df_dm = det_f.copy()
 
-        # Normalizar a DM/DE/DO si el texto lo permite
+        # Normalizar DM/DE/DO
         def map_dmde_do(x):
             if pd.isna(x):
                 return "SIN CLASIFICAR"
             s = str(x).strip().upper()
-            # Si ya viene como DM/DE/DO:
+
+            # si ya viene exacto
             if s in ["DM", "DE", "DO"]:
                 return s
-            # Si viene como texto:
+
+            # por si viene como texto
             if "MEC" in s:
                 return "DM"
             if "ELEC" in s or "ELÉC" in s:
                 return "DE"
             if "OPER" in s:
                 return "DO"
-            # Si no coincide, lo dejamos como está para que no invente
+
+            # cualquier otro valor lo dejamos para que no invente
             return s
 
-        df_dm["DMDEDO"] = df_dm[class_col].apply(map_dmde_do)
+        df_dm["DMDEDO"] = df_dm["Tipo"].apply(map_dmde_do)
 
-        # Conteo
+        # 1) Conteo
         count_dm = (
             df_dm.groupby("DMDEDO", dropna=False)
             .size()
@@ -386,11 +382,11 @@ with tab2:
             count_dm,
             x="DMDEDO",
             y="Cantidad",
-            title=f"Cantidad de detenciones por DM/DE/DO (columna: {class_col})"
+            title="Cantidad de detenciones por DM/DE/DO"
         )
         st.plotly_chart(fig_count, use_container_width=True)
 
-        # HH por tipo (si existe la columna)
+        # 2) HH por DM/DE/DO
         if "Horas de reparación" in df_dm.columns:
             hh_dm = (
                 df_dm.groupby("DMDEDO", dropna=False)["Horas de reparación"]
@@ -407,13 +403,24 @@ with tab2:
             )
             st.plotly_chart(fig_hh, use_container_width=True)
 
-        # % de participación (para lectura ejecutiva)
-        total = count_dm["Cantidad"].sum()
-        if total > 0:
-            share = count_dm.copy()
-            share["%"] = (share["Cantidad"] / total) * 100
-            st.dataframe(share, use_container_width=True, height=220)
+        # 3) Top 10 equipos por HH dentro de cada DM/DE/DO (opcional pero muy útil)
+        if "Equipo" in df_dm.columns and "Horas de reparación" in df_dm.columns:
+            st.subheader("Top 10 equipos por HH dentro de cada DM/DE/DO")
 
+            tipo_sel = st.selectbox("Selecciona DM/DE/DO", options=sorted(df_dm["DMDEDO"].dropna().unique()))
+            sub = df_dm[df_dm["DMDEDO"] == tipo_sel]
+
+            top_eq = (
+                sub.groupby("Equipo")["Horas de reparación"]
+                .sum()
+                .reset_index()
+                .sort_values("Horas de reparación", ascending=False)
+                .head(10)
+            )
+
+            fig_top = px.bar(top_eq, x="Equipo", y="Horas de reparación",
+                             title=f"Top 10 equipos por HH — {tipo_sel}")
+            st.plotly_chart(fig_top, use_container_width=True)
 
 # -------- TAB 3: DISPONIBILIDAD (FAENA)
 with tab3:
