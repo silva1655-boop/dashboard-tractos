@@ -2,9 +2,8 @@
 import os
 import io
 import re
-from datetime import date
+from datetime import timedelta
 import pandas as pd
-import numpy as np
 import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
@@ -105,45 +104,29 @@ def is_valid_tracto_code(x: str) -> bool:
         return True
     return False
 
-def parse_percent_like_to_number(series: pd.Series) -> pd.Series:
-    """Convierte '85%', '85,2', '0.85' -> numérico (sin escalar)."""
+def percent_to_0_100(series: pd.Series) -> pd.Series:
+    """
+    Convierte porcentajes leídos desde Excel a escala 0..100.
+    - Si vienen como 0.8, 1.0 => los pasa a 80, 100
+    - Si ya vienen como 80, 100 => los deja igual
+    - Si vienen como texto "80%" => los convierte a 80
+    """
     if series is None:
         return series
     s = series.copy()
     if s.dtype == "object":
         s = s.astype(str).str.replace("%", "", regex=False)
         s = s.str.replace(",", ".", regex=False)
-    return pd.to_numeric(s, errors="coerce")
-
-def kpi_to_0_100(series: pd.Series) -> pd.Series:
-    """
-    Normalización robusta a 0..100 (NO ratio 0..1).
-    Soporta:
-      - 0..1 (ej: 0.83) -> 83
-      - 0..5 (ej: 1.2, 3) -> 120, 300   (ratio típico de KPI en tu tabla)
-      - 0..100/150 -> se deja igual
-      - '85%' -> 85
-    """
-    s = parse_percent_like_to_number(series)
-    if s is None:
-        return s
-    if not s.notna().any():
-        return s
-
-    mx = float(s.max())
-
-    # caso ratio (muy típico en tus columnas U,V,T):
-    # - disponibilidad técnica suele ser 0..1
-    # - cumplimiento/utilización pueden ser 0..3
-    if mx <= 5.0:
-        return s * 100.0
-
-    # caso porcentaje típico (0..150)
-    if mx <= 150.0:
-        return s
-
-    # caso 0..10000 (por formatos raros)
-    return s / 100.0
+    s = pd.to_numeric(s, errors="coerce")
+    if s.notna().any():
+        mx = float(s.max())
+        if mx <= 1.5:
+            return s * 100.0
+        if mx <= 150.0:
+            return s
+        if mx > 150.0:
+            return s / 100.0
+    return s
 
 def map_dmde_do(x):
     if pd.isna(x):
@@ -176,10 +159,72 @@ def fmt_num(x, dec=1):
         return "—"
     return f"{x:,.{dec}f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-def fmt_pct_0_100(x, dec=1):
-    if x is None or (isinstance(x, float) and pd.isna(x)):
-        return "—"
-    return f"{x:.{dec}f}%"
+def _as_upper_series(s: pd.Series) -> pd.Series:
+    return s.astype(str).str.strip().str.upper()
+
+def _pct_mean(df: pd.DataFrame, col: str | None):
+    if not col or col not in df.columns or df.empty:
+        return None
+    v = percent_to_0_100(pd.to_numeric(df[col], errors="coerce")).mean()
+    return None if pd.isna(v) else float(v)
+
+def _get_faena_kpis_row(row: pd.Series, col_disp, col_cump, col_util, col_hop, col_indisp, col_tgt, col_op):
+    """
+    Devuelve (disp_tec_0_100, cump_0_100, util_0_100) preferentemente desde columnas T/U/V,
+    si no existen, calcula con fórmula.
+    """
+    disp = None
+    cump = None
+    util = None
+
+    # Disponibilidad técnica (preferir columna T)
+    if col_disp and col_disp in row.index and pd.notna(row[col_disp]):
+        disp = percent_to_0_100(pd.Series([row[col_disp]])).iloc[0]
+    elif col_hop and col_indisp and col_hop in row.index and col_indisp in row.index:
+        hop = pd.to_numeric(pd.Series([row[col_hop]]), errors="coerce").iloc[0]
+        ind = pd.to_numeric(pd.Series([row[col_indisp]]), errors="coerce").iloc[0]
+        if pd.notna(hop) and pd.notna(ind) and (hop + ind) > 0:
+            disp = (hop / (hop + ind)) * 100.0
+
+    # Cumplimiento (preferir columna U)
+    if col_cump and col_cump in row.index and pd.notna(row[col_cump]):
+        cump = percent_to_0_100(pd.Series([row[col_cump]])).iloc[0]
+    elif col_tgt and col_op and col_tgt in row.index and col_op in row.index:
+        tgt = pd.to_numeric(pd.Series([row[col_tgt]]), errors="coerce").iloc[0]
+        opv = pd.to_numeric(pd.Series([row[col_op]]), errors="coerce").iloc[0]
+        if pd.notna(tgt) and tgt > 0 and pd.notna(opv):
+            cump = (opv / tgt) * 100.0
+
+    # Utilización (preferir columna V)
+    if col_util and col_util in row.index and pd.notna(row[col_util]):
+        util = percent_to_0_100(pd.Series([row[col_util]])).iloc[0]
+
+    return disp, cump, util
+
+def _find_faena_window(row: pd.Series, col_ini: str | None, col_fin: str | None):
+    ini = None
+    fin = None
+    if col_ini and col_ini in row.index:
+        ini = pd.to_datetime(row[col_ini], errors="coerce")
+    if col_fin and col_fin in row.index:
+        fin = pd.to_datetime(row[col_fin], errors="coerce")
+    if pd.isna(fin) and pd.notna(ini):
+        fin = ini + timedelta(hours=24)  # fallback objetivo
+    return ini, fin
+
+def _detenciones_in_window(det: pd.DataFrame, terminal: str | None, ini, fin):
+    if det.empty or "Inicio" not in det.columns:
+        return 0, 0.0
+    d = det.copy()
+    d = d[d["Inicio"].notna()]
+    if terminal and "Terminal" in d.columns:
+        d = d[_as_upper_series(d["Terminal"]) == str(terminal).strip().upper()]
+    if ini is not None and pd.notna(ini):
+        d = d[d["Inicio"] >= ini]
+    if fin is not None and pd.notna(fin):
+        d = d[d["Inicio"] <= fin]
+    hh = float(d["Horas de reparación"].sum()) if "Horas de reparación" in d.columns else 0.0
+    return int(d.shape[0]), hh
 
 # =========================================================
 # LOADERS
@@ -187,7 +232,6 @@ def fmt_pct_0_100(x, dec=1):
 @st.cache_data(ttl=DEFAULT_REFRESH_SEC, show_spinner=False)
 def load_main() -> tuple[pd.DataFrame, pd.DataFrame]:
     content = download_google_xlsx(EXCEL_URL)
-
     faena = pd.read_excel(io.BytesIO(content), sheet_name=SHEET_FAENA)
     det = pd.read_excel(io.BytesIO(content), sheet_name=SHEET_DET)
 
@@ -202,7 +246,7 @@ def load_main() -> tuple[pd.DataFrame, pd.DataFrame]:
     num_cols = [
         "Horas Operación", "Horas de operación", "Horas Operación ",
         "Indisponibilidad [HH]", "Indisponibilidad", "Indisponibilidad [H]",
-        "Disponibilidad", "Disponibilidad_Tecnica", "Disponibilidad Técnica", "Disponibilidad_Tecnica_%", "Disponibilidad Técnica %",
+        "Disponibilidad_Tecnica", "Disponibilidad_Tecnica_%", "Disponibilidad técnica",
         "Target Operación", "Target Operacion", "Target",
         "Tractos OP", "Tractos Op",
         "Tractos Utilizados", "Tractos utilizados",
@@ -227,6 +271,10 @@ def load_main() -> tuple[pd.DataFrame, pd.DataFrame]:
     for c in ["Equipo", "Clasificación", "Familia Equipo", "Componente", "Modo de Falla", "Tipo", "Nave", "Buque", "Viaje", "Terminal"]:
         if c in det.columns:
             det[c] = det[c].apply(_safe_upper)
+
+    # Derivados detenciones
+    if "Inicio" in det.columns and det["Inicio"].notna().any():
+        det["Mes"] = det["Inicio"].dt.to_period("M").astype(str)
 
     if "Clasificación" in det.columns:
         det["Clasificación"] = det["Clasificación"].fillna("SIN CLASIFICAR")
@@ -301,13 +349,6 @@ def filter_faena(faena: pd.DataFrame, terminales, buques, fecha_ini, fecha_fin):
         df = df[df["Buque"].astype(str).str.upper().isin([b.upper() for b in buques])]
     return df
 
-def safe_mean_0_100(df: pd.DataFrame, col: str) -> float | None:
-    if df is None or df.empty or (col not in df.columns):
-        return None
-    s = kpi_to_0_100(df[col])
-    m = float(s.mean()) if s.notna().any() else None
-    return m
-
 # =========================================================
 # SIDEBAR (DEFAULT = MES EN CURSO)
 # =========================================================
@@ -333,7 +374,6 @@ with st.sidebar:
     today = pd.Timestamp.today().date()
     first_day_month = pd.Timestamp(today.year, today.month, 1).date()
 
-    # rango por defecto: mes en curso
     det_min = det["Inicio"].min().date() if "Inicio" in det.columns and det["Inicio"].notna().any() else first_day_month
     det_max = det["Inicio"].max().date() if "Inicio" in det.columns and det["Inicio"].notna().any() else today
 
@@ -364,7 +404,7 @@ det_f = filter_det(det, sel_equipos, sel_familias, sel_tipos, sel_naves, fecha_i
 faena_f = filter_faena(faena, sel_terminales, sel_buques, fecha_ini, fecha_fin)
 
 # =========================================================
-# KPI TOP (usa columnas de la tabla si existen; si no, calcula)
+# KPI TOP (MES EN CURSO POR DEFECTO)
 # =========================================================
 c1, c2, c3, c4, c5 = st.columns(5)
 
@@ -372,38 +412,42 @@ total_det = int(det_f.shape[0])
 total_hh = float(det_f["Horas de reparación"].sum()) if "Horas de reparación" in det_f.columns else 0.0
 equipos_afectados = int(det_f["Equipo"].nunique()) if "Equipo" in det_f.columns else 0
 
-# DISP TEC: prioriza columna ya calculada en tabla (T) si existe
-col_disp_tbl = find_first_col(faena_f, ["Disponibilidad_Tecnica", "Disponibilidad Técnica", "Disponibilidad_Tecnica_%", "Disponibilidad Técnica %"])
-disp_tecnica_0_100 = None
-if col_disp_tbl:
-    disp_tecnica_0_100 = safe_mean_0_100(faena_f, col_disp_tbl)
-else:
-    # fallback: calcula desde horas e indisponibilidad
-    col_hop = find_first_col(faena_f, ["Horas Operación", "Horas de operación", "Horas Operación "])
-    col_indisp = find_first_col(faena_f, ["Indisponibilidad [HH]", "Indisponibilidad"])
-    if (not faena_f.empty) and col_hop and col_indisp:
+# Preferir columnas reales: T/U/V
+col_dispT = find_first_col(faena_f, ["Disponibilidad_Tecnica", "Disponibilidad_Tecnica_%", "Disponibilidad técnica"])
+col_cumplU = find_first_col(faena_f, ["Cumplimiento"])
+col_utilV = find_first_col(faena_f, ["Utilizacion", "Utilización"])
+
+# fallback para disponibilidad técnica
+col_hop = find_first_col(faena_f, ["Horas Operación", "Horas de operación", "Horas Operación "])
+col_indisp = find_first_col(faena_f, ["Indisponibilidad [HH]", "Indisponibilidad"])
+
+# fallback para cumplimiento
+col_tgt = find_first_col(faena_f, ["Target Operación", "Target Operacion", "Target"])
+col_op = find_first_col(faena_f, ["Tractos OP", "Tractos Op"])
+
+disp_tecnica = None
+if not faena_f.empty:
+    if col_dispT and faena_f[col_dispT].notna().any():
+        disp_tecnica = _pct_mean(faena_f, col_dispT)
+        if disp_tecnica is not None:
+            disp_tecnica = disp_tecnica / 100.0
+    elif col_hop and col_indisp:
         hop = pd.to_numeric(faena_f[col_hop], errors="coerce")
         ind = pd.to_numeric(faena_f[col_indisp], errors="coerce")
         denom = hop + ind
-        serie = (hop / denom.replace({0: pd.NA})) * 100.0
-        disp_tecnica_0_100 = float(serie.mean()) if serie.notna().any() else None
+        serie = hop / denom.replace({0: pd.NA})
+        disp_tecnica = float(serie.mean()) if serie.notna().any() else None
 
-# Cumplimiento: usa columna U si existe
-col_cumpl = find_first_col(faena_f, ["Cumplimiento"])
-cumpl_0_100 = safe_mean_0_100(faena_f, col_cumpl) if col_cumpl else None
-if cumpl_0_100 is None:
-    # fallback: OP/Target
-    col_tgt = find_first_col(faena_f, ["Target Operación", "Target Operacion", "Target"])
-    col_op = find_first_col(faena_f, ["Tractos OP", "Tractos Op"])
-    if col_tgt and col_op and (not faena_f.empty):
+cumpl = None
+if not faena_f.empty:
+    if col_cumplU and faena_f[col_cumplU].notna().any():
+        m = _pct_mean(faena_f, col_cumplU)
+        cumpl = None if m is None else (m / 100.0)
+    elif col_tgt and col_op:
         tgt = pd.to_numeric(faena_f[col_tgt], errors="coerce")
         opv = pd.to_numeric(faena_f[col_op], errors="coerce")
-        serie = (opv / tgt.replace({0: pd.NA})) * 100.0
-        cumpl_0_100 = float(serie.mean()) if serie.notna().any() else None
-
-# Utilización: usa columna V si existe
-col_util = find_first_col(faena_f, ["Utilizacion", "Utilización"])
-util_0_100 = safe_mean_0_100(faena_f, col_util) if col_util else None
+        serie = opv / tgt.replace({0: pd.NA})
+        cumpl = float(serie.mean()) if serie.notna().any() else None
 
 with c1:
     st.metric("Detenciones (registros)", f"{total_det:,}".replace(",", "."))
@@ -412,9 +456,9 @@ with c2:
 with c3:
     st.metric("Equipos con detención", f"{equipos_afectados:,}".replace(",", "."))
 with c4:
-    st.metric("Disponibilidad técnica", "—" if disp_tecnica_0_100 is None else fmt_pct_0_100(disp_tecnica_0_100, 1))
+    st.metric("Disponibilidad técnica", "—" if disp_tecnica is None else f"{disp_tecnica*100:.1f}%")
 with c5:
-    st.metric("Cumplimiento (OP/Target)", "—" if cumpl_0_100 is None else fmt_pct_0_100(cumpl_0_100, 1))
+    st.metric("Cumplimiento (OP/Target)", "—" if cumpl is None else f"{cumpl*100:.1f}%")
 
 st.caption("Por defecto estás viendo el **mes en curso**. Puedes ajustar fechas y filtros en el panel izquierdo.")
 st.divider()
@@ -427,7 +471,7 @@ tab0, tab2, tab3, tabU, tab4 = st.tabs(
 )
 
 # =========================================================
-# TAB 0: ESTADO GENERAL (mejorado)
+# TAB 0: ESTADO GENERAL
 # =========================================================
 with tab0:
     st.subheader("🏠 Estado actual de flota (hoy)")
@@ -442,32 +486,35 @@ with tab0:
 
     col_tracto = find_first_col(estado, ["#Tracto", "Tracto", "# Tracto", "TRACTO"])
     col_status = find_first_col(estado, ["Status", "STATUS"])
-    col_ubic = find_first_col(estado, ["Ubicación", "Ubicacion", "UBICACIÓN", "UBICACION"])
+    col_ubic = find_first_col(estado, ["Ubicación", "Ubicacion", "UBICACIÓN", "UBICACION", "Terminal"])
 
     if estado.empty or col_tracto is None or col_status is None:
-        st.info("Para la portada necesito columnas en Estado_Flota: Tracto y Status (y ojalá Ubicación).")
+        st.info("Para la portada necesito columnas en Estado_Flota: Tracto y Status.")
     else:
         dfE = estado.copy()
         dfE[col_tracto] = dfE[col_tracto].astype(str).str.strip()
         dfE[col_status] = dfE[col_status].astype(str).str.strip().str.upper()
         if col_ubic and col_ubic in dfE.columns:
-            dfE[col_ubic] = dfE[col_ubic].astype(str).str.strip().str.upper()
+            dfE[col_ubic] = dfE[col_ubic].astype(str).str.strip()
 
+        # sólo filas de tractos reales
         dfE = dfE[dfE[col_tracto].apply(is_valid_tracto_code)].copy()
-        dfE["_operativo"] = dfE[col_status].apply(is_operativo_status)
 
+        dfE["_operativo"] = dfE[col_status].apply(is_operativo_status)
         total_f = int(dfE[col_tracto].nunique())
         op_f = int(dfE[dfE["_operativo"]][col_tracto].nunique())
         no_op_f = max(total_f - op_f, 0)
-        disp_hoy = (op_f / total_f) * 100.0 if total_f else None
+        disp_hoy = (op_f / total_f) if total_f else None
 
         cA, cB, cC, cD = st.columns(4)
         cA.metric("Flota (hoy)", f"{total_f:,}".replace(",", "."))
         cB.metric("Operativos (hoy)", f"{op_f:,}".replace(",", "."))
         cC.metric("No operativos (hoy)", f"{no_op_f:,}".replace(",", "."))
-        cD.metric("Disponibilidad (hoy)", "—" if disp_hoy is None else fmt_pct_0_100(disp_hoy, 1))
+        cD.metric("Disponibilidad (hoy)", "—" if disp_hoy is None else f"{disp_hoy*100:.1f}%")
 
-        pie_df = pd.DataFrame({"Estado": ["Operativos", "No operativos"], "Cantidad": [op_f, no_op_f]})
+        pie_df = pd.DataFrame(
+            {"Estado": ["Operativos", "No operativos"], "Cantidad": [op_f, no_op_f]}
+        )
         fig_pie = px.pie(
             pie_df, names="Estado", values="Cantidad",
             title="Flota hoy (Operativos vs No operativos)",
@@ -476,118 +523,7 @@ with tab0:
         )
         st.plotly_chart(fig_pie, use_container_width=True, key="tab0_pie_flotahoy")
 
-        # --- Tractos por terminal (Ubicación) ---
-        st.markdown("### Tractos por terminal (hoy)")
-        if col_ubic and col_ubic in dfE.columns and dfE[col_ubic].notna().any():
-            for term in sorted(dfE[col_ubic].dropna().unique()):
-                sub = dfE[dfE[col_ubic] == term].copy()
-                ops = sorted(sub[sub["_operativo"]][col_tracto].unique())
-                noops = sorted(sub[~sub["_operativo"]][col_tracto].unique())
-
-                st.markdown(f"**{term}** — ✅ {len(ops)} operativos | ❌ {len(noops)} fuera")
-                st.write(f"✅ Operativos: {', '.join(ops) if ops else '—'}")
-                st.write(f"❌ Fuera servicio: {', '.join(noops) if noops else '—'}")
-        else:
-            st.info("No encuentro columna Ubicación en Estado_Flota para separar por terminal.")
-
-        st.divider()
-
-        # --- Últimas 3 faenas por terminal (desde tabla Faena + detenciones asociadas) ---
-        st.subheader("📌 Últimas 3 faenas por terminal (KPI reales desde tu tabla)")
-
-        dfF = faena.copy()
-        dfF = _to_datetime(dfF, ["Inicio OP", "Termino Op", "Termino OP", "Término OP"])
-        if "Inicio OP" not in dfF.columns or dfF["Inicio OP"].isna().all():
-            st.info("No puedo calcular “últimas 3 faenas” porque falta 'Inicio OP' en la tabla Faena.")
-        else:
-            # columnas KPI (prioridad a tu tabla)
-            c_disp = find_first_col(dfF, ["Disponibilidad_Tecnica", "Disponibilidad Técnica", "Disponibilidad_Tecnica_%", "Disponibilidad Técnica %"])
-            c_cum = find_first_col(dfF, ["Cumplimiento"])
-            c_utl = find_first_col(dfF, ["Utilizacion", "Utilización"])
-
-            # normalizaciones a % para mostrar
-            if c_disp: dfF["_DispTec_%"] = kpi_to_0_100(dfF[c_disp])
-            if c_cum:  dfF["_Cumpl_%"]   = kpi_to_0_100(dfF[c_cum])
-            if c_utl:  dfF["_Util_%"]    = kpi_to_0_100(dfF[c_utl])
-
-            # si no existen, fallback mínimo
-            if not c_disp:
-                col_hop0 = find_first_col(dfF, ["Horas Operación", "Horas de operación", "Horas Operación "])
-                col_ind0 = find_first_col(dfF, ["Indisponibilidad [HH]", "Indisponibilidad"])
-                if col_hop0 and col_ind0:
-                    hop = pd.to_numeric(dfF[col_hop0], errors="coerce")
-                    ind = pd.to_numeric(dfF[col_ind0], errors="coerce")
-                    dfF["_DispTec_%"] = (hop / (hop + ind).replace({0: pd.NA})) * 100.0
-
-            if "Terminal" not in dfF.columns:
-                st.info("Falta columna 'Terminal' en Faena para separar por terminal.")
-            else:
-                dfF["_Terminal"] = dfF["Terminal"].astype(str).str.upper().str.strip()
-                dfF = dfF.sort_values("Inicio OP", ascending=False)
-
-                # detenciones: asociar por ventana Inicio..Termino y Terminal (+ Buque si existe)
-                det_assoc = det.copy()
-                det_assoc = _to_datetime(det_assoc, ["Inicio"])
-                has_det_terminal = "Terminal" in det_assoc.columns
-                has_det_buque = "Buque" in det_assoc.columns
-                has_det_inicio = "Inicio" in det_assoc.columns and det_assoc["Inicio"].notna().any()
-
-                for term in sorted(dfF["_Terminal"].dropna().unique()):
-                    last3 = dfF[dfF["_Terminal"] == term].head(3).copy()
-                    if last3.empty:
-                        continue
-
-                    rows = []
-                    for _, r in last3.iterrows():
-                        ini = r.get("Inicio OP")
-                        fin = r.get("Termino Op") if "Termino Op" in last3.columns else r.get("Termino OP")
-                        buq = str(r.get("Buque")).upper().strip() if "Buque" in last3.columns else None
-
-                        dsub = det_assoc.copy()
-                        if has_det_inicio and pd.notna(ini):
-                            dsub = dsub[dsub["Inicio"] >= ini]
-                        if has_det_inicio and pd.notna(fin):
-                            dsub = dsub[dsub["Inicio"] <= fin]
-                        if has_det_terminal:
-                            dsub = dsub[dsub["Terminal"].astype(str).str.upper().str.strip() == term]
-                        if has_det_buque and buq and buq != "NAN":
-                            dsub = dsub[dsub["Buque"].astype(str).str.upper().str.strip() == buq]
-
-                        det_count = int(len(dsub))
-                        det_hh = float(dsub["Horas de reparación"].sum()) if "Horas de reparación" in dsub.columns else 0.0
-
-                        rows.append({
-                            "Inicio OP": r.get("Inicio OP"),
-                            "Buque": r.get("Buque", ""),
-                            "Disp. Técnica": r.get("_DispTec_%", np.nan),
-                            "Cumplimiento": r.get("_Cumpl_%", np.nan),
-                            "Utilización": r.get("_Util_%", np.nan),
-                            "Detenciones": det_count,
-                            "HH Detención": det_hh
-                        })
-
-                    out = pd.DataFrame(rows)
-                    # formato visual
-                    st.markdown(f"**{term}**")
-                    st.dataframe(
-                        out,
-                        use_container_width=True,
-                        height=160
-                    )
-
-            with st.expander("🛈 Cómo se calcula (para evitar malas interpretaciones)"):
-                st.markdown(
-                    """
-- **Disponibilidad Técnica (%)**: se toma desde tu columna **Disponibilidad_Tecnica (T)** si existe.  
-  Si no existe, se calcula como: **Horas Operación / (Horas Operación + Indisponibilidad[HH])**.
-- **Cumplimiento (%)**: se toma desde tu columna **Cumplimiento (U)** si existe; si viene como ratio (ej 0.83, 1.2, 3), el dashboard lo convierte a % (83%, 120%, 300%).
-- **Utilización (%)**: se toma desde tu columna **Utilizacion (V)** si existe; mismo criterio de conversión (ratio -> %).
-- **Detenciones y HH**: se asocian a cada faena por ventana de tiempo **Inicio OP → Término OP**, filtrando por **Terminal** y (si existe en detenciones) por **Buque**.
-                    """
-                )
-
-        st.divider()
-        st.markdown("### Listado de tractos (hoy) — verde = operativo / rojo = no operativo")
+        st.markdown("### Listado de tractos (hoy) — **verde = operativo** / **rojo = no operativo**")
 
         cols_show = [col_tracto, col_status]
         if col_ubic and col_ubic in dfE.columns:
@@ -600,76 +536,196 @@ with tab0:
                 return ["background-color: #e8f5e9; color: #1b5e20; font-weight: 600;"] * len(row)
             return ["background-color: #ffebee; color: #b71c1c; font-weight: 600;"] * len(row)
 
-        st.dataframe(show.style.apply(_style_row, axis=1), use_container_width=True, height=520)
+        st.dataframe(show.style.apply(_style_row, axis=1), use_container_width=True, height=420)
+
+        # =========================================================
+        # NUEVO: Tractos por Terminal (operativos / fuera de servicio)
+        # =========================================================
+        st.divider()
+        st.subheader("📍 Tractos disponibles por Terminal (hoy)")
+
+        if col_ubic and col_ubic in dfE.columns:
+            df_term = dfE.copy()
+            df_term["_terminal"] = df_term[col_ubic].astype(str).str.strip().replace({"": "SIN TERMINAL"})
+            df_term["_tracto"] = df_term[col_tracto].astype(str).str.strip()
+
+            resumen = []
+            for term, g in df_term.groupby("_terminal"):
+                ops = sorted(g[g["_operativo"]]["_tracto"].unique().tolist())
+                noops = sorted(g[~g["_operativo"]]["_tracto"].unique().tolist())
+                resumen.append({
+                    "Terminal": term,
+                    "Operativos (tractos)": ", ".join(ops) if ops else "—",
+                    "Fuera de servicio (tractos)": ", ".join(noops) if noops else "—",
+                    "Operativos": len(ops),
+                    "Fuera servicio": len(noops),
+                    "Total": len(set(ops + noops))
+                })
+            df_res = pd.DataFrame(resumen).sort_values(["Terminal"])
+            st.dataframe(df_res, use_container_width=True, height=280)
+
+            with st.expander("🛈 Cómo se interpreta este bloque"):
+                st.markdown(
+                    """
+- **Operativos (verde)**: estado contiene “EN SERVICIO / OPERATIVO / DISPONIBLE / OK”.
+- **Fuera de servicio (rojo)**: estado contiene “FUERA DE SERVICIO / DETENIDO / MTTO / FALLA / BAJA”.
+- Esta sección refleja el **estado real actual** desde **Estado_Flota**.
+                    """
+                )
+        else:
+            st.info("No encontré una columna de Terminal/Ubicación en Estado_Flota. Si existe, nómbrala como 'Ubicación' o 'Terminal'.")
+
+        # =========================================================
+        # NUEVO: Últimas 3 faenas por Terminal (T/U/V + detenciones)
+        # =========================================================
+        st.divider()
+        st.subheader("🧾 Últimas 3 faenas por Terminal (KPIs reales + detenciones asociadas)")
+
+        if faena_f.empty:
+            st.info("No hay registros de Faena con los filtros actuales.")
+        else:
+            dfF = faena_f.copy()
+
+            col_ini = find_first_col(dfF, ["Inicio OP"])
+            col_fin = find_first_col(dfF, ["Termino OP", "Termino Op", "Término OP"])
+            col_term = find_first_col(dfF, ["Terminal"])
+            col_buq = find_first_col(dfF, ["Buque"])
+
+            col_disp = find_first_col(dfF, ["Disponibilidad_Tecnica", "Disponibilidad_Tecnica_%", "Disponibilidad técnica"])
+            col_cump = find_first_col(dfF, ["Cumplimiento"])
+            col_util = find_first_col(dfF, ["Utilizacion", "Utilización"])
+
+            col_hop2 = find_first_col(dfF, ["Horas Operación", "Horas de operación", "Horas Operación "])
+            col_ind2 = find_first_col(dfF, ["Indisponibilidad [HH]", "Indisponibilidad"])
+            col_tgt2 = find_first_col(dfF, ["Target Operación", "Target Operacion", "Target"])
+            col_op2 = find_first_col(dfF, ["Tractos OP", "Tractos Op"])
+
+            if not col_ini or not col_term:
+                st.info("Para este bloque necesito al menos 'Inicio OP' y 'Terminal' en Faena.")
+            else:
+                dfF["_inicio"] = pd.to_datetime(dfF[col_ini], errors="coerce")
+                dfF = dfF[dfF["_inicio"].notna()].copy()
+                dfF["_terminal"] = dfF[col_term].astype(str).str.strip().str.upper()
+
+                # selector terminal para hacerlo legible
+                terms = sorted(dfF["_terminal"].dropna().unique().tolist())
+                sel_t = st.selectbox("Terminal", options=["(Todos)"] + terms, index=0, key="tab0_sel_terminal_faena")
+
+                if sel_t != "(Todos)":
+                    dfF_view = dfF[dfF["_terminal"] == sel_t].copy()
+                else:
+                    dfF_view = dfF.copy()
+
+                # construir resumen: 3 últimas faenas por terminal
+                rows = []
+                for term, g in dfF_view.groupby("_terminal"):
+                    g2 = g.sort_values("_inicio", ascending=False).head(3).copy()
+                    for _, r in g2.iterrows():
+                        ini, fin = _find_faena_window(r, col_ini, col_fin)
+                        dcount, dhh = _detenciones_in_window(det, term, ini, fin)  # usa det completo (más real que det_f)
+                        disp, cump, util = _get_faena_kpis_row(
+                            r, col_disp, col_cump, col_util,
+                            col_hop2, col_ind2, col_tgt2, col_op2
+                        )
+                        rows.append({
+                            "Terminal": term,
+                            "Inicio OP": ini,
+                            "Buque": (r[col_buq] if col_buq and col_buq in dfF.columns else ""),
+                            "Disponibilidad_Técnica (T)": disp,
+                            "Cumplimiento (U)": cump,
+                            "Utilización (V)": util,
+                            "Detenciones (n)": dcount,
+                            "Detenciones (HH)": dhh
+                        })
+
+                df_last = pd.DataFrame(rows)
+                if df_last.empty:
+                    st.info("No hay suficientes faenas para mostrar (revisa filtros/fechas).")
+                else:
+                    # formateo
+                    df_last["Inicio OP"] = pd.to_datetime(df_last["Inicio OP"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
+                    for c in ["Disponibilidad_Técnica (T)", "Cumplimiento (U)", "Utilización (V)"]:
+                        df_last[c] = pd.to_numeric(df_last[c], errors="coerce")
+
+                    st.dataframe(df_last, use_container_width=True, height=320)
+
+                    # gráfico rápido por terminal (promedio de esas 3)
+                    gk = df_last.copy()
+                    gk["Disponibilidad_Técnica (T)"] = pd.to_numeric(gk["Disponibilidad_Técnica (T)"], errors="coerce")
+                    gk["Cumplimiento (U)"] = pd.to_numeric(gk["Cumplimiento (U)"], errors="coerce")
+                    gk["Utilización (V)"] = pd.to_numeric(gk["Utilización (V)"], errors="coerce")
+                    gg = gk.groupby("Terminal")[["Disponibilidad_Técnica (T)", "Cumplimiento (U)", "Utilización (V)"]].mean().reset_index()
+                    melt = gg.melt(id_vars=["Terminal"], var_name="KPI", value_name="%")
+
+                    st.plotly_chart(
+                        px.bar(
+                            melt, x="Terminal", y="%", color="KPI", barmode="group",
+                            title="Promedio KPIs (últimas 3 faenas por Terminal)"
+                        ),
+                        use_container_width=True,
+                        key="tab0_bar_last3_kpis"
+                    )
+
+                with st.expander("🛈 Cómo se calcula (objetivo y sin ambigüedad)"):
+                    st.markdown(
+                        """
+**Este bloque usa principalmente los valores reales ya calculados en tu tabla (Faena):**
+
+- **Disponibilidad Técnica (T)**  
+  - Se toma desde la columna **`Disponibilidad_Tecnica`** si existe.  
+  - Si no existe, se calcula:  
+    **Disponibilidad Técnica = Horas Operación / (Horas Operación + Indisponibilidad[HH])**.
+
+- **Cumplimiento (U)**  
+  - Se toma desde la columna **`Cumplimiento`** si existe.  
+  - Si no existe, se calcula:  
+    **Cumplimiento = Tractos OP / Target Operación**.
+
+- **Utilización (V)**  
+  - Se toma desde la columna **`Utilizacion`** (V) si existe (ej.: 83%, 125%).  
+  - No se “reinventa” acá: se muestra como **está definido en tu tabla**, que es lo que pediste.
+
+- **Detenciones asociadas a la faena**
+  - Se cuentan por **Terminal** y por **ventana de tiempo**: Inicio OP → Término OP.  
+  - Si no hay Término OP, se asume **Inicio OP + 24h** (fallback objetivo).
+                        """
+                    )
 
 # =========================================================
-# TAB 2: DETENCIONES (con Jackknife)
+# TAB 2: DETENCIONES
 # =========================================================
 with tab2:
     st.subheader("🛑 Detenciones — análisis")
 
-    if det_f.empty:
-        st.info("No hay detenciones con los filtros actuales.")
+    if det_f.empty or "Tipo" not in det_f.columns:
+        st.info("No hay detenciones filtradas o falta columna 'Tipo'.")
     else:
-        # DM/DE/DO
-        if "Tipo" in det_f.columns:
-            df_dm = det_f.copy()
-            df_dm["DMDEDO"] = df_dm["Tipo"].apply(map_dmde_do)
+        df_dm = det_f.copy()
+        df_dm["DMDEDO"] = df_dm["Tipo"].apply(map_dmde_do)
 
-            cL, cR = st.columns(2)
-            count_dm = df_dm.groupby("DMDEDO").size().reset_index(name="Cantidad").sort_values("Cantidad", ascending=False)
-            cL.plotly_chart(px.bar(count_dm, x="DMDEDO", y="Cantidad", title="Cantidad por DM / DE / DO"),
-                            use_container_width=True, key="tab2_bar_dm_count")
+        col_left, col_right = st.columns(2)
 
-            if "Horas de reparación" in df_dm.columns:
-                hh_dm = df_dm.groupby("DMDEDO")["Horas de reparación"].sum().reset_index().sort_values("Horas de reparación", ascending=False)
-                cR.plotly_chart(px.bar(hh_dm, x="DMDEDO", y="Horas de reparación", title="HH por DM / DE / DO"),
-                                use_container_width=True, key="tab2_bar_dm_hh")
+        count_dm = df_dm.groupby("DMDEDO").size().reset_index(name="Cantidad").sort_values("Cantidad", ascending=False)
+        col_left.plotly_chart(
+            px.bar(count_dm, x="DMDEDO", y="Cantidad", title="Cantidad por DM / DE / DO"),
+            use_container_width=True,
+            key="tab2_bar_dm_count"
+        )
 
-        st.divider()
-        st.subheader("🎯 Jackknife (priorización tipo Pareto)")
-
-        # Selector de dimensión
-        dims = []
-        for d in ["Equipo", "Componente", "Modo de Falla", "Clasificación", "Familia Equipo"]:
-            if d in det_f.columns:
-                dims.append(d)
-
-        if ("Horas de reparación" not in det_f.columns) or (len(dims) == 0):
-            st.info("Necesito 'Horas de reparación' y al menos una columna categórica (Equipo/Componente/Modo de Falla/...).")
-        else:
-            dim = st.selectbox("Dimensión para priorizar", dims, index=0)
-            topn = st.slider("Top N", 5, 30, 10)
-
-            jdf = det_f.copy()
-            jdf["_HH"] = pd.to_numeric(jdf["Horas de reparación"], errors="coerce").fillna(0.0)
-            jdf[dim] = jdf[dim].fillna("SIN DATO")
-
-            agg = jdf.groupby(dim)["_HH"].sum().reset_index().sort_values("_HH", ascending=False)
-            agg = agg.head(topn).copy()
-            total = float(agg["_HH"].sum()) if len(agg) else 0.0
-            agg["%"] = (agg["_HH"] / total * 100.0) if total > 0 else 0.0
-            agg["% Acum"] = agg["%"].cumsum()
-
-            fig = go.Figure()
-            fig.add_trace(go.Bar(x=agg[dim], y=agg["_HH"], name="HH"))
-            fig.add_trace(go.Scatter(x=agg[dim], y=agg["% Acum"], name="% acumulado", yaxis="y2", mode="lines+markers"))
-
-            fig.update_layout(
-                title=f"Jackknife / Pareto de HH por {dim} (Top {topn})",
-                yaxis=dict(title="HH"),
-                yaxis2=dict(title="% acumulado", overlaying="y", side="right", range=[0, 100]),
-                legend=dict(orientation="h"),
-                margin=dict(l=40, r=40, t=60, b=40)
+        if "Horas de reparación" in df_dm.columns:
+            hh_dm = df_dm.groupby("DMDEDO")["Horas de reparación"].sum().reset_index().sort_values("Horas de reparación", ascending=False)
+            col_right.plotly_chart(
+                px.bar(hh_dm, x="DMDEDO", y="Horas de reparación", title="HH por DM / DE / DO"),
+                use_container_width=True,
+                key="tab2_bar_dm_hh"
             )
-            st.plotly_chart(fig, use_container_width=True, key="tab2_jackknife")
 
-        st.divider()
-        st.subheader("Tabla detenciones filtradas")
-        st.dataframe(det_f, use_container_width=True, height=520)
+    st.divider()
+    st.subheader("Tabla detenciones filtradas")
+    st.dataframe(det_f, use_container_width=True, height=520)
 
 # =========================================================
-# TAB 3: DISPONIBILIDAD (FAENA) - usa tu T si existe
+# TAB 3: DISPONIBILIDAD (FAENA)
 # =========================================================
 with tab3:
     st.subheader("✅ Disponibilidad por Faena (histórico)")
@@ -679,34 +735,43 @@ with tab3:
     else:
         df = faena_f.copy()
 
-        c_disp = find_first_col(df, ["Disponibilidad_Tecnica", "Disponibilidad Técnica", "Disponibilidad_Tecnica_%", "Disponibilidad Técnica %"])
-        if c_disp:
-            df["DispTec_%"] = kpi_to_0_100(df[c_disp])
-        else:
-            col_hop = find_first_col(df, ["Horas Operación", "Horas de operación", "Horas Operación "])
-            col_indisp = find_first_col(df, ["Indisponibilidad [HH]", "Indisponibilidad"])
-            if col_hop and col_indisp:
-                hop = pd.to_numeric(df[col_hop], errors="coerce")
-                ind = pd.to_numeric(df[col_indisp], errors="coerce")
-                df["DispTec_%"] = (hop / (hop + ind).replace({0: pd.NA})) * 100.0
+        col_ini = find_first_col(df, ["Inicio OP"])
+        col_term = find_first_col(df, ["Terminal"])
+        col_disp = find_first_col(df, ["Disponibilidad_Tecnica", "Disponibilidad_Tecnica_%", "Disponibilidad técnica"])
 
-        with st.expander("🛈 ¿Qué es esta disponibilidad?"):
-            st.write("**Disponibilidad técnica (%)**: valor real desde tu tabla (si existe) o calculado como **Horas Operación / (Horas Operación + Indisponibilidad[HH])**.")
+        # fallback
+        col_hop = find_first_col(df, ["Horas Operación", "Horas de operación", "Horas Operación "])
+        col_indisp = find_first_col(df, ["Indisponibilidad [HH]", "Indisponibilidad"])
 
-        if "Inicio OP" in df.columns and df["Inicio OP"].notna().any() and "DispTec_%" in df.columns:
-            df["Fecha"] = pd.to_datetime(df["Inicio OP"], errors="coerce").dt.date
-            g = df.groupby("Fecha")["DispTec_%"].mean().reset_index()
+        if col_disp and df[col_disp].notna().any():
+            df["Disponibilidad_Tecnica_%"] = percent_to_0_100(df[col_disp])
+        elif col_hop and col_indisp:
+            hop = pd.to_numeric(df[col_hop], errors="coerce")
+            ind = pd.to_numeric(df[col_indisp], errors="coerce")
+            denom = hop + ind
+            df["Disponibilidad_Tecnica_%"] = (hop / denom.replace({0: pd.NA})) * 100
+
+        with st.expander("🛈 Qué estoy mostrando aquí"):
+            st.write(
+                "Se muestra **Disponibilidad Técnica**. Preferimos el valor real de tu tabla (**Disponibilidad_Tecnica**, columna T). "
+                "Si no existe, se calcula como: **Horas Operación / (Horas Operación + Indisponibilidad[HH])**."
+            )
+
+        # Serie por día
+        if col_ini and df[col_ini].notna().any() and "Disponibilidad_Tecnica_%" in df.columns:
+            df["Fecha"] = pd.to_datetime(df[col_ini], errors="coerce").dt.date
+            g = df.groupby("Fecha")["Disponibilidad_Tecnica_%"].mean().reset_index()
             st.plotly_chart(
-                px.line(g, x="Fecha", y="DispTec_%", markers=True, title="Disponibilidad técnica promedio por día (%)"),
+                px.line(g, x="Fecha", y="Disponibilidad_Tecnica_%", markers=True, title="Disponibilidad técnica promedio por día (%)"),
                 use_container_width=True,
                 key="tab3_line_disptec_dia"
             )
 
-        # promedio por terminal (para lectura simple)
-        if "Terminal" in df.columns and "DispTec_%" in df.columns:
-            gt = df.groupby("Terminal")["DispTec_%"].mean().reset_index().sort_values("DispTec_%", ascending=False)
+        # Promedio por terminal (si existe)
+        if col_term and "Disponibilidad_Tecnica_%" in df.columns:
+            gt = df.groupby(col_term)["Disponibilidad_Tecnica_%"].mean().reset_index()
             st.plotly_chart(
-                px.bar(gt, x="Terminal", y="DispTec_%", title="Disponibilidad técnica promedio por Terminal (%)"),
+                px.bar(gt, x=col_term, y="Disponibilidad_Tecnica_%", title="Promedio Disponibilidad Técnica (%) por Terminal"),
                 use_container_width=True,
                 key="tab3_bar_disptec_terminal"
             )
@@ -714,7 +779,7 @@ with tab3:
         st.dataframe(df, use_container_width=True, height=520)
 
 # =========================================================
-# TAB U: UTILIZACIÓN (usa U,V reales)
+# TAB U: UTILIZACIÓN (basado en U y V reales)
 # =========================================================
 with tabU:
     st.subheader("📈 Utilización y Cumplimiento (según tabla Faena)")
@@ -723,76 +788,97 @@ with tabU:
     if dfu.empty:
         st.info("No hay registros de Faena con los filtros actuales.")
     else:
+        col_ini = find_first_col(dfu, ["Inicio OP"])
+        col_term = find_first_col(dfu, ["Terminal"])
+        col_buq = find_first_col(dfu, ["Buque"])
+
+        # preferimos reales
         col_cumpl = find_first_col(dfu, ["Cumplimiento"])
         col_util = find_first_col(dfu, ["Utilizacion", "Utilización"])
-        col_disp = find_first_col(dfu, ["Disponibilidad_Tecnica", "Disponibilidad Técnica", "Disponibilidad_Tecnica_%", "Disponibilidad Técnica %"])
+        col_disp = find_first_col(dfu, ["Disponibilidad_Tecnica", "Disponibilidad_Tecnica_%", "Disponibilidad técnica"])
 
-        # convertir a 0..100 para mostrar
-        if col_cumpl: dfu["_Cumpl_%"] = kpi_to_0_100(dfu[col_cumpl])
-        if col_util:  dfu["_Util_%"]  = kpi_to_0_100(dfu[col_util])
-        if col_disp:  dfu["_Disp_%"]  = kpi_to_0_100(dfu[col_disp])
+        # fallback mínimos por si faltan
+        col_tgt = find_first_col(dfu, ["Target Operación", "Target Operacion", "Target"])
+        col_op = find_first_col(dfu, ["Tractos OP", "Tractos Op"])
 
-        # KPIs del tab
+        # normalizar % a 0..100
+        if col_cumpl and col_cumpl in dfu.columns:
+            dfu[col_cumpl] = percent_to_0_100(dfu[col_cumpl])
+        else:
+            # calcular si no existe
+            if col_tgt and col_op:
+                dfu["Cumplimiento"] = (pd.to_numeric(dfu[col_op], errors="coerce") / pd.to_numeric(dfu[col_tgt], errors="coerce").replace({0: pd.NA})) * 100.0
+                col_cumpl = "Cumplimiento"
+
+        if col_util and col_util in dfu.columns:
+            dfu[col_util] = percent_to_0_100(dfu[col_util])
+
+        if col_disp and col_disp in dfu.columns:
+            dfu["_DispTec_%"] = percent_to_0_100(dfu[col_disp])
+
+        # KPIs arriba (promedio según filtros)
         k1, k2, k3 = st.columns(3)
-        m_c = float(dfu["_Cumpl_%"].mean()) if "_Cumpl_%" in dfu.columns and dfu["_Cumpl_%"].notna().any() else None
-        m_u = float(dfu["_Util_%"].mean()) if "_Util_%" in dfu.columns and dfu["_Util_%"].notna().any() else None
-        m_d = float(dfu["_Disp_%"].mean()) if "_Disp_%" in dfu.columns and dfu["_Disp_%"].notna().any() else None
+        m_c = _pct_mean(dfu, col_cumpl)
+        m_u = _pct_mean(dfu, col_util) if col_util else None
+        m_d = _pct_mean(dfu, "_DispTec_%") if "_DispTec_%" in dfu.columns else None
 
-        k1.metric("Cumplimiento (U)", "—" if m_c is None else fmt_pct_0_100(m_c, 1))
-        k2.metric("Utilización (V)", "—" if m_u is None else fmt_pct_0_100(m_u, 1))
-        k3.metric("Disponibilidad Técnica (T)", "—" if m_d is None else fmt_pct_0_100(m_d, 1))
+        k1.metric("Cumplimiento (U)", "—" if m_c is None else f"{m_c:.1f}%")
+        k2.metric("Utilización (V)", "—" if m_u is None else f"{m_u:.1f}%")
+        k3.metric("Disponibilidad Técnica (T)", "—" if m_d is None else f"{m_d:.1f}%")
 
         with st.expander("🛈 Interpretación sin errores"):
             st.markdown(
                 """
-- Si tu Excel guarda `0.83`, eso significa **83%** (ratio).  
-- Si guarda `1.20`, eso significa **120%**.  
-- Si guarda `3.00`, eso significa **300%**.  
-
-Este dashboard **detecta ratios (0..5) y los convierte a porcentaje** automáticamente para que coincida con lo que tú interpretas en Excel.
+- **Cumplimiento (U)**: se toma desde tu tabla (**columna U**) o se calcula como **Tractos OP / Target** si no existe.
+- **Utilización (V)**: se toma desde tu tabla (**columna V**).  
+  > Se muestra tal cual está definida en tu Excel (no se redefine en el dashboard).
+- **Disponibilidad Técnica (T)**: se muestra como referencia si existe en tu tabla (columna T).
                 """
             )
 
         st.divider()
 
-        # series por fecha (simple y entendible)
-        if "Inicio OP" in dfu.columns and dfu["Inicio OP"].notna().any():
-            dfu["Fecha"] = pd.to_datetime(dfu["Inicio OP"], errors="coerce").dt.date
+        # Serie temporal por día (Cumplimiento y Utilización)
+        if col_ini and dfu[col_ini].notna().any():
+            dfu["Fecha"] = pd.to_datetime(dfu[col_ini], errors="coerce").dt.date
 
             series_cols = []
-            if "_Cumpl_%" in dfu.columns: series_cols.append("_Cumpl_%")
-            if "_Util_%" in dfu.columns: series_cols.append("_Util_%")
-            if "_Disp_%" in dfu.columns: series_cols.append("_Disp_%")
+            if col_cumpl: series_cols.append(col_cumpl)
+            if col_util: series_cols.append(col_util)
 
             if series_cols:
                 g = dfu.groupby("Fecha")[series_cols].mean().reset_index()
                 melt = g.melt(id_vars=["Fecha"], var_name="KPI", value_name="%")
                 st.plotly_chart(
-                    px.line(melt, x="Fecha", y="%", color="KPI", markers=True, title="Evolución diaria de KPI (%)"),
+                    px.line(melt, x="Fecha", y="%", color="KPI", markers=True, title="Evolución diaria (promedio)"),
                     use_container_width=True,
-                    key="tabU_line_kpis"
+                    key="tabU_line_daily"
                 )
 
-        # por terminal (barras agrupadas)
-        if "Terminal" in dfu.columns:
-            metrics = [c for c in ["_Cumpl_%", "_Util_%", "_Disp_%"] if c in dfu.columns]
-            if metrics:
-                gt = dfu.groupby("Terminal")[metrics].mean().reset_index()
-                melt = gt.melt(id_vars=["Terminal"], var_name="KPI", value_name="%")
+        # Promedio por terminal
+        if col_term:
+            kpis = []
+            if col_cumpl: kpis.append(col_cumpl)
+            if col_util: kpis.append(col_util)
+            if "_DispTec_%" in dfu.columns: kpis.append("_DispTec_%")
+
+            if kpis:
+                gt = dfu.groupby(col_term)[kpis].mean().reset_index()
+                melt2 = gt.melt(id_vars=[col_term], var_name="KPI", value_name="%")
                 st.plotly_chart(
-                    px.bar(melt, x="Terminal", y="%", color="KPI", barmode="group",
-                           title="Promedios por Terminal (KPI %)"),
+                    px.bar(melt2, x=col_term, y="%", color="KPI", barmode="group", title="Promedio KPIs por Terminal"),
                     use_container_width=True,
-                    key="tabU_bar_terminal"
+                    key="tabU_bar_terminal_kpis"
                 )
 
         st.divider()
         st.subheader("Tabla (gestión)")
-
         cols_show = []
-        for c in ["Inicio OP", "Terminal", "Buque", col_disp, col_cumpl, col_util, "_Disp_%", "_Cumpl_%", "_Util_%"]:
+        for c in [col_ini, col_term, col_buq, col_disp, col_cumpl, col_util, col_tgt, col_op]:
             if c and c in dfu.columns and c not in cols_show:
                 cols_show.append(c)
+        if "_DispTec_%" in dfu.columns and "_DispTec_%" not in cols_show:
+            cols_show.append("_DispTec_%")
 
         st.dataframe(dfu[cols_show], use_container_width=True, height=520)
 
