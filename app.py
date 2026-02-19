@@ -1032,6 +1032,112 @@ with tab2:
                 key="tab2_bar_dm_hh",
             )
 
+    # ---------------------------------------------------------
+    # Análisis Jackknife / Pareto de detenciones
+    # ---------------------------------------------------------
+    st.divider()
+    st.subheader("📊 Análisis Jackknife / Pareto de detenciones")
+    if det_f.empty:
+        st.info("No hay detenciones filtradas para análisis Pareto/Jackknife.")
+    else:
+        # Elegir una columna categórica para el análisis Pareto. Se prefiere
+        # 'Familia Equipo', luego 'Clasificación', luego 'Tipo'.
+        cat_col = find_first_col(
+            det_f, ["Familia Equipo", "Clasificación", "Tipo"]
+        )
+        if cat_col:
+            # Agrupar y ordenar por número de detenciones
+            dfp = det_f.copy()
+            dfp_cat = (
+                dfp.groupby(cat_col)
+                .size()
+                .reset_index(name="Cantidad")
+                .sort_values("Cantidad", ascending=False)
+            )
+            if not dfp_cat.empty:
+                total = dfp_cat["Cantidad"].sum()
+                dfp_cat["Cumulativo"] = dfp_cat["Cantidad"].cumsum() / total * 100.0
+                # Asignar zonas A/B/C basadas en el porcentaje acumulado
+                dfp_cat["Zona"] = pd.cut(
+                    dfp_cat["Cumulativo"],
+                    bins=[0, 80, 95, 100],
+                    labels=["A", "B", "C"],
+                    right=True,
+                    include_lowest=True,
+                ).astype(str)
+                # Limitar a las 10 primeras categorías para mayor claridad
+                dfp_top = dfp_cat.head(10)
+                # Construir figura combinada de barras y línea acumulativa
+                fig_pareto = go.Figure()
+                fig_pareto.add_trace(
+                    go.Bar(
+                        x=dfp_top[cat_col],
+                        y=dfp_top["Cantidad"],
+                        name="Cantidad",
+                        marker_color="#1f77b4",
+                    )
+                )
+                fig_pareto.add_trace(
+                    go.Scatter(
+                        x=dfp_top[cat_col],
+                        y=dfp_top["Cumulativo"],
+                        name="Cumulativo (%)",
+                        mode="lines+markers",
+                        marker_color="#ff7f0e",
+                        yaxis="y2",
+                    )
+                )
+                fig_pareto.update_layout(
+                    title=f"Pareto de detenciones por {cat_col}",
+                    xaxis_title=cat_col,
+                    yaxis=dict(title="Cantidad"),
+                    yaxis2=dict(
+                        title="Cumulativo (%)",
+                        overlaying="y",
+                        side="right",
+                        rangemode="tozero",
+                        range=[0, 100],
+                    ),
+                    legend=dict(x=0.01, y=0.99, bgcolor="rgba(0,0,0,0)", bordercolor="rgba(0,0,0,0)"),
+                )
+                st.plotly_chart(
+                    fig_pareto,
+                    use_container_width=True,
+                    key="tab2_pareto",
+                )
+                # Tabla con zonas para referencia
+                dfp_display = dfp_top[[cat_col, "Cantidad", "Cumulativo", "Zona"]].copy()
+                dfp_display["Cumulativo"] = dfp_display["Cumulativo"].round(1)
+                st.dataframe(
+                    dfp_display.rename(
+                        columns={
+                            cat_col: "Categoría",
+                            "Cantidad": "Nº detenciones",
+                            "Cumulativo": "Cumulativo (%)",
+                            "Zona": "Zona",
+                        }
+                    ),
+                    use_container_width=True,
+                    height=300,
+                )
+                with st.expander("🛈 Interpretación de zonas Jackknife/Pareto"):
+                    st.markdown(
+                        """
+**Zona A (≤ 80% acumulado)**: estas categorías concentran la mayor parte de las detenciones. Constituyen el foco
+principal de mejora, ya que unas pocas causas generan la mayoría de los eventos.
+
+**Zona B (80%–95% acumulado)**: causas de impacto medio. Una vez controladas las de zona A, estas
+categorías pueden proporcionar mejoras adicionales moderadas.
+
+**Zona C (≥ 95% acumulado)**: causas de baja frecuencia. Invertir esfuerzos en estas categorías suele tener
+un retorno limitado, pero sirven como referencia para un control general.
+                        """
+                    )
+        else:
+            st.info(
+                "No se encontró una columna apropiada para análisis Pareto/Jackknife (Familia Equipo/Clasificación/Tipo)."
+            )
+
     st.divider()
     st.subheader("Tabla detenciones filtradas")
     st.dataframe(det_f, use_container_width=True, height=520)
