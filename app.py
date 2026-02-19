@@ -791,18 +791,6 @@ with tab0:
                     """
                 )
 
-            # Tabla detallada de tractos por ubicación
-            st.divider()
-            st.subheader("🚩 Tractos por ubicación (detalle)")
-            df_loc = dfE[[col_ubic, col_tracto, col_status]].copy()
-            df_loc = df_loc.dropna(subset=[col_tracto])
-            # Ordenar por ubicación y tracto
-            df_loc = df_loc.sort_values([col_ubic, col_tracto])
-            # Renombrar columnas para visualización
-            df_loc_display = df_loc.rename(
-                columns={col_ubic: "Ubicación", col_tracto: "Tracto", col_status: "Estado"}
-            )
-            st.dataframe(df_loc_display, use_container_width=True, height=300)
         else:
             st.info(
                 "No encontré una columna de Terminal/Ubicación en Estado_Flota. Si existe, nómbrala como 'Ubicación' o 'Terminal'."
@@ -1033,14 +1021,14 @@ with tab2:
             )
 
     # ---------------------------------------------------------
-    # Análisis Jackknife / Pareto de detenciones
+    # Análisis Jackknife de detenciones (sin pareto)
     # ---------------------------------------------------------
     st.divider()
-    st.subheader("📊 Análisis Jackknife / Pareto de detenciones")
+    st.subheader("📊 Análisis Jackknife de detenciones")
     if det_f.empty:
-        st.info("No hay detenciones filtradas para análisis Pareto/Jackknife.")
+        st.info("No hay detenciones filtradas para análisis Jackknife.")
     else:
-        # Elegir una columna categórica para el análisis Pareto. Se prefiere
+        # Elegir una columna categórica para el análisis Jackknife. Se prefiere
         # 'Familia Equipo', luego 'Clasificación', luego 'Tipo'.
         cat_col = find_first_col(
             det_f, ["Familia Equipo", "Clasificación", "Tipo"]
@@ -1055,6 +1043,7 @@ with tab2:
                 .sort_values("Cantidad", ascending=False)
             )
             if not dfp_cat.empty:
+                # Calcular porcentaje acumulado para asignar zonas
                 total = dfp_cat["Cantidad"].sum()
                 dfp_cat["Cumulativo"] = dfp_cat["Cantidad"].cumsum() / total * 100.0
                 # Asignar zonas A/B/C basadas en el porcentaje acumulado
@@ -1067,60 +1056,48 @@ with tab2:
                 ).astype(str)
                 # Limitar a las 10 primeras categorías para mayor claridad
                 dfp_top = dfp_cat.head(10)
-                # Construir figura combinada de barras y línea acumulativa
-                fig_pareto = go.Figure()
-                fig_pareto.add_trace(
+                # Mapear zona a colores para la barra
+                color_map = {"A": "#e41a1c", "B": "#ff7f00", "C": "#4daf4a"}
+                dfp_top["Color"] = dfp_top["Zona"].map(color_map)
+                # Construir figura solo de barras coloreadas por zona
+                fig_jack = go.Figure()
+                fig_jack.add_trace(
                     go.Bar(
                         x=dfp_top[cat_col],
                         y=dfp_top["Cantidad"],
-                        name="Cantidad",
-                        marker_color="#1f77b4",
+                        marker_color=dfp_top["Color"],
+                        name="Nº detenciones",
                     )
                 )
-                fig_pareto.add_trace(
-                    go.Scatter(
-                        x=dfp_top[cat_col],
-                        y=dfp_top["Cumulativo"],
-                        name="Cumulativo (%)",
-                        mode="lines+markers",
-                        marker_color="#ff7f0e",
-                        yaxis="y2",
-                    )
-                )
-                fig_pareto.update_layout(
-                    title=f"Pareto de detenciones por {cat_col}",
+                fig_jack.update_layout(
+                    title=f"Jackknife de detenciones por {cat_col}",
                     xaxis_title=cat_col,
-                    yaxis=dict(title="Cantidad"),
-                    yaxis2=dict(
-                        title="Cumulativo (%)",
-                        overlaying="y",
-                        side="right",
-                        rangemode="tozero",
-                        range=[0, 100],
+                    yaxis_title="Cantidad",
+                    legend=dict(
+                        title="Zona Jackknife",
+                        itemsizing="constant",
+                        traceorder="normal",
                     ),
-                    legend=dict(x=0.01, y=0.99, bgcolor="rgba(0,0,0,0)", bordercolor="rgba(0,0,0,0)"),
                 )
                 st.plotly_chart(
-                    fig_pareto,
+                    fig_jack,
                     use_container_width=True,
-                    key="tab2_pareto",
+                    key="tab2_jackknife",
                 )
-                # Tabla con zonas para referencia
-                dfp_display = dfp_top[[cat_col, "Cantidad", "Cumulativo", "Zona"]].copy()
-                dfp_display["Cumulativo"] = dfp_display["Cumulativo"].round(1)
+                # Tabla con zonas para referencia (sin columna Cumulativo)
+                dfp_display = dfp_top[[cat_col, "Cantidad", "Zona"]].copy()
                 st.dataframe(
                     dfp_display.rename(
                         columns={
                             cat_col: "Categoría",
                             "Cantidad": "Nº detenciones",
-                            "Cumulativo": "Cumulativo (%)",
                             "Zona": "Zona",
                         }
                     ),
                     use_container_width=True,
-                    height=300,
+                    height=250,
                 )
-                with st.expander("🛈 Interpretación de zonas Jackknife/Pareto"):
+                with st.expander("🛈 Interpretación de zonas Jackknife"):
                     st.markdown(
                         """
 **Zona A (≤ 80% acumulado)**: estas categorías concentran la mayor parte de las detenciones. Constituyen el foco
@@ -1135,7 +1112,7 @@ un retorno limitado, pero sirven como referencia para un control general.
                     )
         else:
             st.info(
-                "No se encontró una columna apropiada para análisis Pareto/Jackknife (Familia Equipo/Clasificación/Tipo)."
+                "No se encontró una columna apropiada para análisis Jackknife (Familia Equipo/Clasificación/Tipo)."
             )
 
     st.divider()
