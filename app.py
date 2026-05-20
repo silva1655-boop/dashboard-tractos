@@ -30,27 +30,26 @@ ESTADO_URL_DEFAULT = f"https://docs.google.com/spreadsheets/d/{SHEET_ESTADO_ID_D
 ESTADO_URL = os.getenv("ESTADO_URL", ESTADO_URL_DEFAULT).strip()
 SHEET_ESTADO = os.getenv("SHEET_ESTADO", "Estado_Flota")
 
+# ── Solicitudes de Mantenimiento ──────────────────────────
+SOLICITUDES_ID_DEFAULT = "1wZtLhAPvbft27aX9EmySSul5h4e7YeeT"
+SOLICITUDES_URL_DEFAULT = (
+    f"https://docs.google.com/spreadsheets/d/{SOLICITUDES_ID_DEFAULT}/export?format=xlsx"
+)
+SOLICITUDES_URL = os.getenv("SOLICITUDES_URL", SOLICITUDES_URL_DEFAULT).strip()
+SHEET_SOLICITUDES = os.getenv("SHEET_SOLICITUDES", "Sheet1")  # ajustar si el nombre es distinto
+
 DEFAULT_REFRESH_SEC = int(os.getenv("REFRESH_SEC", "120"))
 
 # =========================================================
 # HELPERS
 # =========================================================
 def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Normaliza los nombres de columnas eliminando espacios duplicados
-    y recortando espacios al inicio o final. No modifica acentos ni
-    símbolos; para una búsqueda más flexible usa ``find_first_col``.
-    """
     df = df.copy()
     df.columns = [re.sub(r"\s+", " ", str(c)).strip() for c in df.columns]
     return df
 
 
 def _to_datetime(df: pd.DataFrame, cols):
-    """
-    Convierte en fecha/hora las columnas indicadas, ignorando
-    errores. Devuelve una copia del DataFrame.
-    """
     df = df.copy()
     for c in cols:
         if c in df.columns:
@@ -59,22 +58,12 @@ def _to_datetime(df: pd.DataFrame, cols):
 
 
 def _safe_upper(s):
-    """
-    Devuelve el string en mayúsculas y sin espacios extra; si el valor
-    es NaN o None retorna None. Se usa para normalizar texto en
-    Detenciones.
-    """
     if pd.isna(s):
         return None
     return str(s).strip().upper()
 
 
 def download_google_xlsx(url: str) -> bytes:
-    """
-    Descarga un archivo XLSX desde la URL de Google Sheets. Si Google
-    responde HTML (por ejemplo, porque no has permitido compartir
-    públicamente el Sheet) se lanza una excepción con un mensaje útil.
-    """
     headers = {"User-Agent": "Mozilla/5.0"}
     r = requests.get(url, headers=headers, timeout=60)
     r.raise_for_status()
@@ -88,33 +77,17 @@ def download_google_xlsx(url: str) -> bytes:
 
 
 def find_first_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
-    """
-    Devuelve el nombre de la primera columna encontrada en ``df`` que
-    coincida con alguno de los ``candidates``. La búsqueda es robusta a
-    mayúsculas/minúsculas, acentos, espacios, guiones, underscores,
-    paréntesis y porcentajes. Por ejemplo, tanto ``"Termino OP"`` como
-    ``"término op"`` o ``"Termino_Op"`` se considerarán equivalentes.
-
-    Si ``df`` está vacío o ``None`` se devuelve ``None``.
-    """
     if df is None or df.empty:
         return None
 
-    # Coincidencia exacta primero para preservar nombres originales
     for c in candidates:
         if c in df.columns:
             return c
 
     def _norm_key(s: str) -> str:
-        """
-        Normaliza un nombre quitando acentos y caracteres de separación
-        (espacios, guiones, underscores, paréntesis, porcentajes). El
-        resultado se convierte a minúsculas.
-        """
         if s is None:
             return ""
         s = str(s).strip()
-        # elimina acentos
         s = "".join(
             c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c)
         )
@@ -123,14 +96,12 @@ def find_first_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
             s = s.replace(ch, "")
         return s
 
-    # Construir mapa normalizado → columna original
     mapping: dict[str, str] = {}
     for col in df.columns:
         key = _norm_key(col)
         if key:
             mapping[key] = col
 
-    # Buscar en los candidatos
     for c in candidates:
         key = _norm_key(c)
         if key in mapping:
@@ -139,11 +110,6 @@ def find_first_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
 
 
 def _make_unique_columns(cols):
-    """
-    Hace únicos los nombres de columnas, añadiendo sufijos ``__n`` si
-    aparecen duplicados o nombres vacíos. Esto se usa al leer la hoja
-    Estado_Flota cuando los encabezados se extraen manualmente.
-    """
     seen = {}
     out = []
     for c in cols:
@@ -160,11 +126,6 @@ def _make_unique_columns(cols):
 
 
 def is_valid_tracto_code(x: str) -> bool:
-    """
-    Determina si el string parece ser un código de tracto válido. Excluye
-    totalizadores y categorías (por ejemplo, "TOTAL", "EN SERVICIO"). Se
-    acepta una letra seguida de hasta cuatro dígitos, con o sin espacio.
-    """
     if x is None:
         return False
     s = str(x).strip().upper()
@@ -181,23 +142,13 @@ def is_valid_tracto_code(x: str) -> bool:
 
 
 def percent_to_0_100(series: pd.Series) -> pd.Series:
-    """
-    Convierte porcentajes leídos desde Excel a escala 0..100.
-
-    - Si vienen como 0.8, 1.0 => los pasa a 80, 100
-    - Si ya vienen como 80, 100 => los deja igual
-    - Si vienen como texto "80%" => los convierte a 80
-    - Si vienen como 120 => se considera 120 (p.ej. 120%)
-    """
     if series is None:
         return series
     s = series.copy()
     if s.dtype == "object":
         s = s.astype(str).str.replace("%", "", regex=False)
-        # en países hispanos se usa la coma como separador decimal
         s = s.str.replace(",", ".", regex=False)
     s = pd.to_numeric(s, errors="coerce")
-    # Detectar rango máximo para decidir conversión
     if s.notna().any():
         mx = float(s.max())
         if mx <= 1.5:
@@ -210,10 +161,6 @@ def percent_to_0_100(series: pd.Series) -> pd.Series:
 
 
 def map_dmde_do(x):
-    """
-    Mapea los tipos de detención a las categorías DM/DE/DO. Si no es
-    posible determinarlo retorna "SIN CLASIFICAR".
-    """
     if pd.isna(x):
         return "SIN CLASIFICAR"
     s = str(x).strip().upper()
@@ -229,12 +176,6 @@ def map_dmde_do(x):
 
 
 def is_operativo_status(status_str: str) -> bool:
-    """
-    Determina si un estado de flota indica que el equipo está operativo.
-    Palabras clave de operativo: EN SERVICIO, OPERATIVO, DISPONIBLE, OK.
-    Palabras clave de no operativo: FUERA DE SERVICIO, DETEN, DETENIDO,
-    MTTO, MANT, FALLA, BAJA.
-    """
     if status_str is None:
         return False
     s = str(status_str).strip().upper()
@@ -248,10 +189,6 @@ def is_operativo_status(status_str: str) -> bool:
 
 
 def fmt_num(x, dec=1):
-    """
-    Formatea un número con separador de miles (punto) y coma decimal.
-    Si el valor es None o NaN devuelve un guión largo.
-    """
     if x is None or (isinstance(x, float) and pd.isna(x)):
         return "—"
     return f"{x:,.{dec}f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -262,11 +199,6 @@ def _as_upper_series(s: pd.Series) -> pd.Series:
 
 
 def _pct_mean(df: pd.DataFrame, col: str | None):
-    """
-    Calcula el promedio de una columna que representa porcentajes. Se usa
-    ``percent_to_0_100`` para convertir los valores antes de promediar.
-    Devuelve ``None`` si la columna no existe o no hay datos válidos.
-    """
     if not col or col not in df.columns or df.empty:
         return None
     v = percent_to_0_100(pd.to_numeric(df[col], errors="coerce")).mean()
@@ -274,20 +206,10 @@ def _pct_mean(df: pd.DataFrame, col: str | None):
 
 
 def _get_faena_kpis_row(row: pd.Series, col_disp, col_cump, col_util, col_hop, col_indisp, col_tgt, col_op):
-    """
-    Devuelve una tupla ``(disp, cump, util)`` con los KPIs de una fila
-    individual de Faena. Se prefieren las columnas reales (columna T/U/V)
-    y en su defecto se calcula con fórmulas:
-
-    - Disponibilidad Técnica (T) = Horas Operación / (Horas Operación + Indisponibilidad)
-    - Cumplimiento (U) = Tractos OP / Target Operación
-    - Utilización (V) = valor de la columna de utilización
-    """
     disp = None
     cump = None
     util = None
 
-    # Disponibilidad técnica
     if col_disp and col_disp in row.index and pd.notna(row[col_disp]):
         disp = percent_to_0_100(pd.Series([row[col_disp]])).iloc[0]
     elif col_hop and col_indisp and col_hop in row.index and col_indisp in row.index:
@@ -296,7 +218,6 @@ def _get_faena_kpis_row(row: pd.Series, col_disp, col_cump, col_util, col_hop, c
         if pd.notna(hop) and pd.notna(ind) and (hop + ind) > 0:
             disp = (hop / (hop + ind)) * 100.0
 
-    # Cumplimiento
     if col_cump and col_cump in row.index and pd.notna(row[col_cump]):
         cump = percent_to_0_100(pd.Series([row[col_cump]])).iloc[0]
     elif col_tgt and col_op and col_tgt in row.index and col_op in row.index:
@@ -305,7 +226,6 @@ def _get_faena_kpis_row(row: pd.Series, col_disp, col_cump, col_util, col_hop, c
         if pd.notna(tgt) and tgt > 0 and pd.notna(opv):
             cump = (opv / tgt) * 100.0
 
-    # Utilización
     if col_util and col_util in row.index and pd.notna(row[col_util]):
         util = percent_to_0_100(pd.Series([row[col_util]])).iloc[0]
 
@@ -313,11 +233,6 @@ def _get_faena_kpis_row(row: pd.Series, col_disp, col_cump, col_util, col_hop, c
 
 
 def _find_faena_window(row: pd.Series, col_ini: str | None, col_fin: str | None):
-    """
-    Devuelve una tupla (inicio, fin) de la ventana temporal de la faena. Si
-    no existe la columna de término se asume un rango de 24 horas a partir
-    del inicio.
-    """
     ini = None
     fin = None
     if col_ini and col_ini in row.index:
@@ -325,15 +240,11 @@ def _find_faena_window(row: pd.Series, col_ini: str | None, col_fin: str | None)
     if col_fin and col_fin in row.index:
         fin = pd.to_datetime(row[col_fin], errors="coerce")
     if pd.isna(fin) and pd.notna(ini):
-        fin = ini + timedelta(hours=24)  # fallback objetivo
+        fin = ini + timedelta(hours=24)
     return ini, fin
 
 
 def _detenciones_in_window(det: pd.DataFrame, terminal: str | None, ini, fin):
-    """
-    Cuenta las detenciones y suma sus horas de reparación dentro de la
-    ventana ``[ini, fin]`` y opcionalmente filtra por terminal.
-    """
     if det.empty or "Inicio" not in det.columns:
         return 0, 0.0
     d = det.copy()
@@ -347,17 +258,126 @@ def _detenciones_in_window(det: pd.DataFrame, terminal: str | None, ini, fin):
     hh = float(d["Horas de reparación"].sum()) if "Horas de reparación" in d.columns else 0.0
     return int(d.shape[0]), hh
 
+
+# =========================================================
+# SOLICITUDES — HELPERS ESPECÍFICOS
+# =========================================================
+
+# Mapeo de estados canónicos
+_ESTADO_MAP = {
+    # Abierta
+    "ABIERTA": "Abierta",
+    "ABIERTO": "Abierta",
+    "OPEN": "Abierta",
+    "NUEVA": "Abierta",
+    "NUEVO": "Abierta",
+    "PENDIENTE": "Abierta",
+    # En planificación
+    "EN PLANIFICACION": "En Planificación",
+    "EN PLANIFICACIÓN": "En Planificación",
+    "PLANIFICACION": "En Planificación",
+    "PLANIFICACIÓN": "En Planificación",
+    "PLANIFICADO": "En Planificación",
+    "PLANIFICADA": "En Planificación",
+    "EN PROCESO": "En Planificación",
+    "EN PROGRESO": "En Planificación",
+    "IN PROGRESS": "En Planificación",
+    # Cerrada
+    "CERRADA": "Cerrada",
+    "CERRADO": "Cerrada",
+    "CLOSED": "Cerrada",
+    "COMPLETADA": "Cerrada",
+    "COMPLETADO": "Cerrada",
+    "FINALIZADA": "Cerrada",
+    "FINALIZADO": "Cerrada",
+    "EJECUTADA": "Cerrada",
+    "EJECUTADO": "Cerrada",
+    "TERMINADA": "Cerrada",
+    "TERMINADO": "Cerrada",
+    # Rechazada
+    "RECHAZADA": "Rechazada",
+    "RECHAZADO": "Rechazada",
+    "REJECTED": "Rechazada",
+    "CANCELADA": "Rechazada",
+    "CANCELADO": "Rechazada",
+}
+
+_ESTADO_ORDER = ["Abierta", "En Planificación", "Cerrada", "Rechazada", "Sin Estado"]
+
+_ESTADO_COLORS = {
+    "Abierta": "#f59e0b",
+    "En Planificación": "#3b82f6",
+    "Cerrada": "#22c55e",
+    "Rechazada": "#ef4444",
+    "Sin Estado": "#9ca3af",
+}
+
+_PRIORIDAD_ORDER = ["Crítica", "Alta", "Media", "Baja", "Sin Prioridad"]
+_PRIORIDAD_COLORS = {
+    "Crítica": "#ef4444",
+    "Alta": "#f97316",
+    "Media": "#f59e0b",
+    "Baja": "#22c55e",
+    "Sin Prioridad": "#9ca3af",
+}
+
+_PRIORIDAD_MAP = {
+    "CRITICA": "Crítica",
+    "CRÍTICA": "Crítica",
+    "CRITICAL": "Crítica",
+    "URGENTE": "Crítica",
+    "ALTA": "Alta",
+    "HIGH": "Alta",
+    "MEDIA": "Media",
+    "MEDIUM": "Media",
+    "NORMAL": "Media",
+    "BAJA": "Baja",
+    "LOW": "Baja",
+}
+
+
+def _map_estado_canonico(s) -> str:
+    if pd.isna(s) or str(s).strip() == "":
+        return "Sin Estado"
+    key = str(s).strip().upper()
+    return _ESTADO_MAP.get(key, str(s).strip().title())
+
+
+def _map_prioridad_canonica(s) -> str:
+    if pd.isna(s) or str(s).strip() == "":
+        return "Sin Prioridad"
+    key = str(s).strip().upper()
+    return _PRIORIDAD_MAP.get(key, str(s).strip().title())
+
+
+def _badge_estado(estado: str) -> str:
+    """Devuelve un emoji badge según el estado."""
+    return {
+        "Abierta": "🟡",
+        "En Planificación": "🔵",
+        "Cerrada": "🟢",
+        "Rechazada": "🔴",
+    }.get(estado, "⚪")
+
+
+def _style_solicitudes(row):
+    """Colorea filas de la tabla de solicitudes según estado."""
+    color_map = {
+        "Abierta": ("background-color:#fffbeb; color:#78350f;", "#fef3c7"),
+        "En Planificación": ("background-color:#eff6ff; color:#1e3a5f;", "#dbeafe"),
+        "Cerrada": ("background-color:#f0fdf4; color:#14532d;", "#dcfce7"),
+        "Rechazada": ("background-color:#fff1f2; color:#7f1d1d;", "#ffe4e6"),
+    }
+    estado = row.get("Estado", "")
+    style, _ = color_map.get(estado, ("", ""))
+    return [style] * len(row)
+
+
 # =========================================================
 # LOADERS
 # =========================================================
 @st.cache_data(ttl=DEFAULT_REFRESH_SEC, show_spinner=False)
 def load_main() -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Carga las hojas de Faena y Detenciones desde el archivo principal. Los
-    encabezados se normalizan con ``_normalize_cols`` y se convierten
-    algunas columnas a numéricas. También se derivan campos como el mes
-    en detenciones.
-    """
     content = download_google_xlsx(EXCEL_URL)
     faena = pd.read_excel(io.BytesIO(content), sheet_name=SHEET_FAENA)
     det = pd.read_excel(io.BytesIO(content), sheet_name=SHEET_DET)
@@ -365,11 +385,9 @@ def load_main() -> tuple[pd.DataFrame, pd.DataFrame]:
     faena = _normalize_cols(faena)
     det = _normalize_cols(det)
 
-    # Fechas
     faena = _to_datetime(faena, ["Inicio OP", "Termino OP", "Termino Op", "Término OP"])
     det = _to_datetime(det, ["Inicio", "Fin", "Fecha"])
 
-    # Convertir columnas numéricas típicas en Faena a valores numéricos
     num_cols = [
         "Horas Operación", "Horas de operación", "Horas Operación ",
         "Indisponibilidad [HH]", "Indisponibilidad", "Indisponibilidad [H]", "Indisponibilidad[HH]",
@@ -391,11 +409,9 @@ def load_main() -> tuple[pd.DataFrame, pd.DataFrame]:
         if c in faena.columns:
             faena[c] = pd.to_numeric(faena[c], errors="coerce")
 
-    # Detenciones numéricas
     if "Horas de reparación" in det.columns:
         det["Horas de reparación"] = pd.to_numeric(det["Horas de reparación"], errors="coerce")
 
-    # Normalizar texto en detenciones
     for c in [
         "Equipo", "Clasificación", "Familia Equipo", "Componente",
         "Modo de Falla", "Tipo", "Nave", "Buque", "Viaje", "Terminal"
@@ -403,7 +419,6 @@ def load_main() -> tuple[pd.DataFrame, pd.DataFrame]:
         if c in det.columns:
             det[c] = det[c].apply(_safe_upper)
 
-    # Derivados en detenciones
     if "Inicio" in det.columns and det["Inicio"].notna().any():
         det["Mes"] = det["Inicio"].dt.to_period("M").astype(str)
 
@@ -415,12 +430,6 @@ def load_main() -> tuple[pd.DataFrame, pd.DataFrame]:
 
 @st.cache_data(ttl=DEFAULT_REFRESH_SEC, show_spinner=False)
 def load_estado() -> pd.DataFrame:
-    """
-    Carga la hoja Estado_Flota y detecta automáticamente la fila de
-    encabezado buscando una fila que contenga las palabras ``tracto`` y
-    ``status``. Si no se encuentra se intenta leer de forma estándar. Se
-    devuelve un DataFrame normalizado y con nombres de columnas únicos.
-    """
     content = download_google_xlsx(ESTADO_URL)
     raw = pd.read_excel(io.BytesIO(content), sheet_name=SHEET_ESTADO, header=None)
     raw = raw.dropna(how="all").fillna("")
@@ -448,12 +457,108 @@ def load_estado() -> pd.DataFrame:
     df = _normalize_cols(df)
     df.columns = _make_unique_columns(df.columns)
 
-    # Limpiar espacios en columnas de texto
     for j in range(df.shape[1]):
         if df.iloc[:, j].dtype == "object":
             df.iloc[:, j] = df.iloc[:, j].astype(str).str.strip()
 
     return df
+
+
+@st.cache_data(ttl=DEFAULT_REFRESH_SEC, show_spinner=False)
+def load_solicitudes() -> pd.DataFrame:
+    """
+    Carga la hoja de Solicitudes de Mantenimiento desde Google Sheets.
+    Detecta automáticamente la fila de encabezado buscando palabras clave
+    como 'solicitud', 'estado', 'equipo', 'descripcion'.
+    Normaliza estados y prioridades a categorías canónicas.
+    """
+    content = download_google_xlsx(SOLICITUDES_URL)
+
+    # Intentar detectar hoja correcta
+    xl = pd.ExcelFile(io.BytesIO(content))
+    sheet_names = xl.sheet_names
+
+    # Priorizar nombre configurado, luego cualquier hoja disponible
+    target_sheet = SHEET_SOLICITUDES
+    if target_sheet not in sheet_names:
+        target_sheet = sheet_names[0]
+
+    raw = pd.read_excel(io.BytesIO(content), sheet_name=target_sheet, header=None)
+    raw = raw.dropna(how="all").fillna("")
+
+    def _row_text(i):
+        return " | ".join([str(x).strip().lower() for x in raw.iloc[i].tolist()])
+
+    # Buscar fila de encabezado
+    header_idx = 0
+    kw_sets = [
+        {"solicitud", "estado"},
+        {"equipo", "estado"},
+        {"descripcion", "estado"},
+        {"descripción", "estado"},
+        {"mantenimiento", "estado"},
+        {"fecha", "estado"},
+        {"solicitud"},
+        {"n°", "descripcion"},
+        {"n°", "descripción"},
+    ]
+    for i in range(min(len(raw), 15)):
+        txt = _row_text(i)
+        for kw_set in kw_sets:
+            if all(k in txt for k in kw_set):
+                header_idx = i
+                break
+
+    hdr = raw.iloc[header_idx].tolist()
+    df = raw.iloc[header_idx + 1:].copy()
+    df.columns = hdr
+    df = df.dropna(how="all")
+    df = _normalize_cols(df)
+    df.columns = _make_unique_columns(df.columns)
+
+    # Limpiar strings
+    for j in range(df.shape[1]):
+        if df.iloc[:, j].dtype == "object":
+            df.iloc[:, j] = df.iloc[:, j].astype(str).str.strip().replace("nan", "")
+
+    # Normalizar columna Estado
+    col_estado = find_first_col(
+        df,
+        ["Estado", "STATUS", "Status", "Estatus", "Estado solicitud", "Estado Solicitud"],
+    )
+    if col_estado:
+        df["Estado"] = df[col_estado].apply(_map_estado_canonico)
+    else:
+        df["Estado"] = "Sin Estado"
+
+    # Normalizar columna Prioridad
+    col_prio = find_first_col(
+        df, ["Prioridad", "Priority", "Urgencia", "Nivel", "Nivel de urgencia"]
+    )
+    if col_prio:
+        df["Prioridad"] = df[col_prio].apply(_map_prioridad_canonica)
+    else:
+        df["Prioridad"] = "Sin Prioridad"
+
+    # Fechas
+    date_candidates = [
+        "Fecha", "Fecha Solicitud", "Fecha solicitud", "Fecha de solicitud",
+        "Fecha Creación", "Fecha creacion", "Fecha ingreso",
+        "Fecha Cierre", "Fecha cierre", "Fecha de cierre",
+        "Fecha Inicio", "Fecha inicio",
+    ]
+    for dc in date_candidates:
+        col_d = find_first_col(df, [dc])
+        if col_d:
+            df[col_d] = pd.to_datetime(df[col_d], errors="coerce")
+
+    # Quitar filas totalmente vacías o que sean encabezados repetidos
+    if col_estado:
+        df = df[df[col_estado].astype(str).str.upper() != col_estado.upper()]
+
+    df = df.reset_index(drop=True)
+    return df
+
 
 # =========================================================
 # FILTERS
@@ -488,6 +593,7 @@ def filter_faena(faena: pd.DataFrame, terminales, buques, fecha_ini, fecha_fin):
     if buques and "Buque" in df.columns:
         df = df[df["Buque"].astype(str).str.upper().isin([b.upper() for b in buques])]
     return df
+
 
 # =========================================================
 # SIDEBAR (DEFAULT = MES EN CURSO)
@@ -547,7 +653,7 @@ det_f = filter_det(det, sel_equipos, sel_familias, sel_tipos, sel_naves, fecha_i
 faena_f = filter_faena(faena, sel_terminales, sel_buques, fecha_ini, fecha_fin)
 
 # =========================================================
-# KPI TOP (MES EN CURSO POR DEFECTO)
+# KPI TOP
 # =========================================================
 c1, c2, c3, c4, c5 = st.columns(5)
 
@@ -555,7 +661,6 @@ total_det = int(det_f.shape[0])
 total_hh = float(det_f["Horas de reparación"].sum()) if "Horas de reparación" in det_f.columns else 0.0
 equipos_afectados = int(det_f["Equipo"].nunique()) if "Equipo" in det_f.columns else 0
 
-# Preferir columnas reales: T/U/V
 col_dispT = find_first_col(
     faena_f,
     [
@@ -579,23 +684,7 @@ col_cumplU = find_first_col(
         "Cumplimiento(U)",
     ],
 )
-col_utilV = find_first_col(
-    faena_f,
-    [
-        "Utilizacion",
-        "Utilización",
-        "Utilizacion_demandada_%",
-        "Utilización_demandada_%",
-        "Utilizacion_Oferta_%",
-        "Utilización_Oferta_%",
-        "Utilizacion_Capacidad_%",
-        "Utilización_Capacidad_%",
-        "Utilización Esperada",
-        "Utilizacion Esperada",
-    ],
-)
 
-# fallback para disponibilidad técnica
 col_hop = find_first_col(
     faena_f,
     [
@@ -617,7 +706,6 @@ col_indisp = find_first_col(
     ],
 )
 
-# fallback para cumplimiento
 col_tgt = find_first_col(
     faena_f,
     ["Target Operación", "Target Operacion", "Target", "Target operaciones"],
@@ -673,10 +761,17 @@ st.caption(
 st.divider()
 
 # =========================================================
-# TABS (sin Resumen)
+# TABS
 # =========================================================
-tab0, tab2, tab3, tabU, tab4 = st.tabs(
-    ["🏠 Estado General", "🛑 Detenciones", "✅ Disponibilidad (Faena)", "📈 Utilización", "📁 Datos"]
+tab0, tab2, tab3, tabU, tabSol, tab4 = st.tabs(
+    [
+        "🏠 Estado General",
+        "🛑 Detenciones",
+        "✅ Disponibilidad (Faena)",
+        "📈 Utilización",
+        "🔧 Solicitudes de Mantención",
+        "📁 Datos",
+    ]
 )
 
 # =========================================================
@@ -706,7 +801,6 @@ with tab0:
         if col_ubic and col_ubic in dfE.columns:
             dfE[col_ubic] = dfE[col_ubic].astype(str).str.strip()
 
-        # sólo filas de tractos reales
         dfE = dfE[dfE[col_tracto].apply(is_valid_tracto_code)].copy()
 
         dfE["_operativo"] = dfE[col_status].apply(is_operativo_status)
@@ -751,14 +845,10 @@ with tab0:
 
         st.dataframe(show.style.apply(_style_row, axis=1), use_container_width=True, height=420)
 
-        # =========================================================
-        # NUEVO: Tractos por Terminal (operativos / fuera de servicio)
-        # =========================================================
         st.divider()
         st.subheader("📍 Tractos disponibles por Terminal (hoy)")
 
         if col_ubic and col_ubic in dfE.columns:
-            # Resumen de tractos por Terminal con listas de tractos
             df_term = dfE.copy()
             df_term["_terminal"] = (
                 df_term[col_ubic].astype(str).str.strip().replace({"": "SIN TERMINAL"})
@@ -785,20 +875,16 @@ with tab0:
             with st.expander("🛈 Cómo se interpreta este bloque"):
                 st.markdown(
                     """
-- **Operativos (verde)**: estado contiene “EN SERVICIO / OPERATIVO / DISPONIBLE / OK”.
-- **Fuera de servicio (rojo)**: estado contiene “FUERA DE SERVICIO / DETENIDO / MTTO / FALLA / BAJA”.
+- **Operativos (verde)**: estado contiene "EN SERVICIO / OPERATIVO / DISPONIBLE / OK".
+- **Fuera de servicio (rojo)**: estado contiene "FUERA DE SERVICIO / DETENIDO / MTTO / FALLA / BAJA".
 - Esta sección refleja el **estado real actual** desde **Estado_Flota**.
                     """
                 )
-
         else:
             st.info(
                 "No encontré una columna de Terminal/Ubicación en Estado_Flota. Si existe, nómbrala como 'Ubicación' o 'Terminal'."
             )
 
-        # =========================================================
-        # NUEVO: Últimas 3 faenas por Terminal (T/U/V + detenciones)
-        # =========================================================
         st.divider()
         st.subheader("🧾 Últimas 3 faenas por Terminal (KPIs reales + detenciones asociadas)")
 
@@ -872,7 +958,6 @@ with tab0:
                 dfF = dfF[dfF["_inicio"].notna()].copy()
                 dfF["_terminal"] = dfF[col_term].astype(str).str.strip().str.upper()
 
-                # selector terminal para hacerlo legible
                 terms = sorted(dfF["_terminal"].dropna().unique().tolist())
                 sel_t = st.selectbox(
                     "Terminal", options=["(Todos)"] + terms, index=0, key="tab0_sel_terminal_faena"
@@ -883,23 +968,14 @@ with tab0:
                 else:
                     dfF_view = dfF.copy()
 
-                # construir resumen: 3 últimas faenas por terminal
                 rows = []
                 for term, g in dfF_view.groupby("_terminal"):
                     g2 = g.sort_values("_inicio", ascending=False).head(3).copy()
                     for _, r in g2.iterrows():
                         ini, fin = _find_faena_window(r, col_ini, col_fin)
-                        # det usa full det (más real que det_f)
                         dcount, dhh = _detenciones_in_window(det, term, ini, fin)
                         disp, cump, util = _get_faena_kpis_row(
-                            r,
-                            col_disp,
-                            col_cump,
-                            col_util,
-                            col_hop2,
-                            col_ind2,
-                            col_tgt2,
-                            col_op2,
+                            r, col_disp, col_cump, col_util, col_hop2, col_ind2, col_tgt2, col_op2,
                         )
                         rows.append(
                             {
@@ -918,26 +994,17 @@ with tab0:
                 if df_last.empty:
                     st.info("No hay suficientes faenas para mostrar (revisa filtros/fechas).")
                 else:
-                    # formateo
                     df_last["Inicio OP"] = pd.to_datetime(df_last["Inicio OP"], errors="coerce").dt.strftime(
                         "%Y-%m-%d %H:%M"
                     )
-                    for c in [
-                        "Disponibilidad_Técnica (T)",
-                        "Cumplimiento (U)",
-                        "Utilización (V)",
-                    ]:
+                    for c in ["Disponibilidad_Técnica (T)", "Cumplimiento (U)", "Utilización (V)"]:
                         df_last[c] = pd.to_numeric(df_last[c], errors="coerce")
 
                     st.dataframe(df_last, use_container_width=True, height=320)
 
-                    # gráfico rápido por terminal (promedio de esas 3)
                     gk = df_last.copy()
-                    gk["Disponibilidad_Técnica (T)"] = pd.to_numeric(
-                        gk["Disponibilidad_Técnica (T)"], errors="coerce"
-                    )
-                    gk["Cumplimiento (U)"] = pd.to_numeric(gk["Cumplimiento (U)"], errors="coerce")
-                    gk["Utilización (V)"] = pd.to_numeric(gk["Utilización (V)"], errors="coerce")
+                    for col_kpi in ["Disponibilidad_Técnica (T)", "Cumplimiento (U)", "Utilización (V)"]:
+                        gk[col_kpi] = pd.to_numeric(gk[col_kpi], errors="coerce")
                     gg = (
                         gk.groupby("Terminal")[
                             ["Disponibilidad_Técnica (T)", "Cumplimiento (U)", "Utilización (V)"]
@@ -949,39 +1016,20 @@ with tab0:
 
                     st.plotly_chart(
                         px.bar(
-                            melt,
-                            x="Terminal",
-                            y="%",
-                            color="KPI",
-                            barmode="group",
+                            melt, x="Terminal", y="%", color="KPI", barmode="group",
                             title="Promedio KPIs (últimas 3 faenas por Terminal)",
                         ),
                         use_container_width=True,
                         key="tab0_bar_last3_kpis",
                     )
 
-                with st.expander("🛈 Cómo se calcula (objetivo y sin ambigüedad)"):
+                with st.expander("🛈 Cómo se calcula"):
                     st.markdown(
                         """
-**Este bloque usa principalmente los valores reales ya calculados en tu tabla (Faena):**
-
-- **Disponibilidad Técnica (T)**  
-  - Se toma desde la columna **`Disponibilidad_Tecnica`** u otro alias equivalente.  
-  - Si no existe, se calcula:  
-    **Disponibilidad Técnica = Horas Operación / (Horas Operación + Indisponibilidad[HH])**.
-
-- **Cumplimiento (U)**  
-  - Se toma desde la columna **`Cumplimiento`** si existe.  
-  - Si no existe, se calcula:  
-    **Cumplimiento = Tractos OP / Target Operación**.
-
-- **Utilización (V)**  
-  - Se toma desde la columna de utilización (por ejemplo **`Utilizacion`**).  
-  - No se “reinventa” acá: se muestra como **está definido en tu tabla**, que es lo que pediste.
-
-- **Detenciones asociadas a la faena**
-  - Se cuentan por **Terminal** y por **ventana de tiempo**: Inicio OP → Término OP.  
-  - Si no hay Término OP, se asume **Inicio OP + 24h** (fallback objetivo).
+**Disponibilidad Técnica (T)**: columna real o HH Operación / (HH Operación + Indisponibilidad).  
+**Cumplimiento (U)**: columna real o Tractos OP / Target.  
+**Utilización (V)**: columna real tal como está definida en tu tabla.  
+**Detenciones**: filtradas por Terminal y ventana Inicio OP → Término OP (fallback +24h).
                         """
                     )
 
@@ -1020,33 +1068,20 @@ with tab2:
                 key="tab2_bar_dm_hh",
             )
 
-    # ---------------------------------------------------------
-    # Análisis Jackknife de detenciones (sin pareto)
-    # ---------------------------------------------------------
     st.divider()
     st.subheader("📊 Análisis Jackknife de detenciones")
     if det_f.empty:
         st.info("No hay detenciones filtradas para análisis Jackknife.")
     else:
-        # Elegir una columna categórica para el análisis Jackknife. Se prefiere
-        # 'Familia Equipo', luego 'Clasificación', luego 'Tipo'.
-        cat_col = find_first_col(
-            det_f, ["Familia Equipo", "Clasificación", "Tipo"]
-        )
+        cat_col = find_first_col(det_f, ["Familia Equipo", "Clasificación", "Tipo"])
         if cat_col:
-            # Agrupar y ordenar por número de detenciones
             dfp = det_f.copy()
             dfp_cat = (
-                dfp.groupby(cat_col)
-                .size()
-                .reset_index(name="Cantidad")
-                .sort_values("Cantidad", ascending=False)
+                dfp.groupby(cat_col).size().reset_index(name="Cantidad").sort_values("Cantidad", ascending=False)
             )
             if not dfp_cat.empty:
-                # Calcular porcentaje acumulado para asignar zonas
                 total = dfp_cat["Cantidad"].sum()
                 dfp_cat["Cumulativo"] = dfp_cat["Cantidad"].cumsum() / total * 100.0
-                # Asignar zonas A/B/C basadas en el porcentaje acumulado
                 dfp_cat["Zona"] = pd.cut(
                     dfp_cat["Cumulativo"],
                     bins=[0, 80, 95, 100],
@@ -1054,45 +1089,22 @@ with tab2:
                     right=True,
                     include_lowest=True,
                 ).astype(str)
-                # Limitar a las 10 primeras categorías para mayor claridad
                 dfp_top = dfp_cat.head(10)
-                # Mapear zona a colores para la barra
                 color_map = {"A": "#e41a1c", "B": "#ff7f00", "C": "#4daf4a"}
                 dfp_top["Color"] = dfp_top["Zona"].map(color_map)
-                # Construir figura solo de barras coloreadas por zona
                 fig_jack = go.Figure()
                 fig_jack.add_trace(
-                    go.Bar(
-                        x=dfp_top[cat_col],
-                        y=dfp_top["Cantidad"],
-                        marker_color=dfp_top["Color"],
-                        name="Nº detenciones",
-                    )
+                    go.Bar(x=dfp_top[cat_col], y=dfp_top["Cantidad"], marker_color=dfp_top["Color"], name="Nº detenciones")
                 )
                 fig_jack.update_layout(
                     title=f"Jackknife de detenciones por {cat_col}",
                     xaxis_title=cat_col,
                     yaxis_title="Cantidad",
-                    legend=dict(
-                        title="Zona Jackknife",
-                        itemsizing="constant",
-                        traceorder="normal",
-                    ),
                 )
-                st.plotly_chart(
-                    fig_jack,
-                    use_container_width=True,
-                    key="tab2_jackknife",
-                )
-                # Tabla con zonas para referencia (sin columna Cumulativo)
-                dfp_display = dfp_top[[cat_col, "Cantidad", "Zona"]].copy()
+                st.plotly_chart(fig_jack, use_container_width=True, key="tab2_jackknife")
                 st.dataframe(
-                    dfp_display.rename(
-                        columns={
-                            cat_col: "Categoría",
-                            "Cantidad": "Nº detenciones",
-                            "Zona": "Zona",
-                        }
+                    dfp_top[[cat_col, "Cantidad", "Zona"]].rename(
+                        columns={cat_col: "Categoría", "Cantidad": "Nº detenciones"}
                     ),
                     use_container_width=True,
                     height=250,
@@ -1100,20 +1112,13 @@ with tab2:
                 with st.expander("🛈 Interpretación de zonas Jackknife"):
                     st.markdown(
                         """
-**Zona A (≤ 80% acumulado)**: estas categorías concentran la mayor parte de las detenciones. Constituyen el foco
-principal de mejora, ya que unas pocas causas generan la mayoría de los eventos.
-
-**Zona B (80%–95% acumulado)**: causas de impacto medio. Una vez controladas las de zona A, estas
-categorías pueden proporcionar mejoras adicionales moderadas.
-
-**Zona C (≥ 95% acumulado)**: causas de baja frecuencia. Invertir esfuerzos en estas categorías suele tener
-un retorno limitado, pero sirven como referencia para un control general.
+**Zona A (≤ 80% acumulado)**: mayor concentración de detenciones. Foco principal de mejora.  
+**Zona B (80%–95% acumulado)**: impacto medio. Mejoras adicionales moderadas.  
+**Zona C (≥ 95% acumulado)**: baja frecuencia, bajo retorno de inversión.
                         """
                     )
         else:
-            st.info(
-                "No se encontró una columna apropiada para análisis Jackknife (Familia Equipo/Clasificación/Tipo)."
-            )
+            st.info("No se encontró columna apropiada para análisis Jackknife.")
 
     st.divider()
     st.subheader("Tabla detenciones filtradas")
@@ -1144,27 +1149,8 @@ with tab3:
             ],
         )
 
-        # fallback
-        col_hop = find_first_col(
-            df,
-            [
-                "Horas Operación",
-                "Horas de operación",
-                "Horas Operación ",
-                "Horas operacion",
-                "Horas de operacion",
-            ],
-        )
-        col_indisp = find_first_col(
-            df,
-            [
-                "Indisponibilidad [HH]",
-                "Indisponibilidad",
-                "Indisponibilidad [H]",
-                "Indisponibilidad[HH]",
-                "Indisponibilidad horas",
-            ],
-        )
+        col_hop = find_first_col(df, ["Horas Operación", "Horas de operación", "Horas Operación ", "Horas operacion"])
+        col_indisp = find_first_col(df, ["Indisponibilidad [HH]", "Indisponibilidad", "Indisponibilidad [H]", "Indisponibilidad[HH]"])
 
         if col_disp and df[col_disp].notna().any():
             df["Disponibilidad_Tecnica_%"] = percent_to_0_100(df[col_disp])
@@ -1180,7 +1166,6 @@ with tab3:
                 "Si no existe, se calcula como: **Horas Operación / (Horas Operación + Indisponibilidad[HH])**."
             )
 
-        # Serie por día
         if col_ini and df[col_ini].notna().any() and "Disponibilidad_Tecnica_%" in df.columns:
             df["Fecha"] = pd.to_datetime(df[col_ini], errors="coerce").dt.date
             g = df.groupby("Fecha")["Disponibilidad_Tecnica_%"].mean().reset_index()
@@ -1190,7 +1175,6 @@ with tab3:
                 key="tab3_line_disptec_dia",
             )
 
-        # Promedio por terminal (si existe)
         if col_term and "Disponibilidad_Tecnica_%" in df.columns:
             gt = df.groupby(col_term)["Disponibilidad_Tecnica_%"].mean().reset_index()
             st.plotly_chart(
@@ -1202,7 +1186,7 @@ with tab3:
         st.dataframe(df, use_container_width=True, height=520)
 
 # =========================================================
-# TAB U: UTILIZACIÓN (basado en U y V reales)
+# TAB U: UTILIZACIÓN
 # =========================================================
 with tabU:
     st.subheader("📈 Utilización y Cumplimiento (según tabla Faena)")
@@ -1215,46 +1199,25 @@ with tabU:
         col_term = find_first_col(dfu, ["Terminal"])
         col_buq = find_first_col(dfu, ["Buque"])
 
-        # preferimos reales
-        col_cumpl = find_first_col(
-            dfu, ["Cumplimiento", "Cumplimiento (U)", "Cumplimiento %", "Cumplimiento(U)"]
-        )
+        col_cumpl = find_first_col(dfu, ["Cumplimiento", "Cumplimiento (U)", "Cumplimiento %", "Cumplimiento(U)"])
         col_util = find_first_col(
             dfu,
-            [
-                "Utilizacion",
-                "Utilización",
-                "Utilizacion_demandada_%",
-                "Utilización_demandada_%",
-                "Utilizacion_Oferta_%",
-                "Utilización_Oferta_%",
-                "Utilizacion_Capacidad_%",
-                "Utilización_Capacidad_%",
-                "Utilización Esperada",
-                "Utilizacion Esperada",
-            ],
+            ["Utilizacion", "Utilización", "Utilizacion_demandada_%", "Utilización_demandada_%",
+             "Utilizacion_Oferta_%", "Utilización_Oferta_%", "Utilizacion_Capacidad_%",
+             "Utilización_Capacidad_%", "Utilización Esperada", "Utilizacion Esperada"],
         )
         col_disp = find_first_col(
             dfu,
-            [
-                "Disponibilidad_Tecnica",
-                "Disponibilidad_Tecnica_%",
-                "Disponibilidad técnica",
-                "Disponibilidad tecnica",
-                "Disponibilidad tecnica %",
-                "Disponibilidad técnica (%)",
-            ],
+            ["Disponibilidad_Tecnica", "Disponibilidad_Tecnica_%", "Disponibilidad técnica",
+             "Disponibilidad tecnica", "Disponibilidad tecnica %", "Disponibilidad técnica (%)"],
         )
 
-        # fallback mínimos por si faltan
         col_tgt = find_first_col(dfu, ["Target Operación", "Target Operacion", "Target", "Target operaciones"])
         col_op = find_first_col(dfu, ["Tractos OP", "Tractos Op", "Tracto OP", "Tractos operación"])
 
-        # normalizar % a 0..100
         if col_cumpl and col_cumpl in dfu.columns:
             dfu[col_cumpl] = percent_to_0_100(dfu[col_cumpl])
         else:
-            # calcular si no existe
             if col_tgt and col_op:
                 dfu["Cumplimiento_calc"] = (
                     pd.to_numeric(dfu[col_op], errors="coerce")
@@ -1268,7 +1231,6 @@ with tabU:
         if col_disp and col_disp in dfu.columns:
             dfu["_DispTec_%"] = percent_to_0_100(dfu[col_disp])
 
-        # KPIs arriba (promedio según filtros)
         k1, k2, k3 = st.columns(3)
         m_c = _pct_mean(dfu, col_cumpl)
         m_u = _pct_mean(dfu, col_util) if col_util else None
@@ -1278,61 +1240,29 @@ with tabU:
         k2.metric("Utilización (V)", "—" if m_u is None else f"{m_u:.1f}%")
         k3.metric("Disponibilidad Técnica (T)", "—" if m_d is None else f"{m_d:.1f}%")
 
-        with st.expander("🛈 Interpretación sin errores"):
-            st.markdown(
-                """
-- **Cumplimiento (U)**: se toma desde tu tabla (columna U) o se calcula como **Tractos OP / Target** si no existe.
-- **Utilización (V)**: se toma desde tu tabla (columna V).  
-  > Se muestra tal cual está definida en tu Excel (no se redefine en el dashboard).
-- **Disponibilidad Técnica (T)**: se muestra como referencia si existe en tu tabla (columna T).
-                """
-            )
-
         st.divider()
 
-        # Serie temporal por día (Cumplimiento y Utilización)
         if col_ini and dfu[col_ini].notna().any():
             dfu["Fecha"] = pd.to_datetime(dfu[col_ini], errors="coerce").dt.date
-
-            series_cols = []
-            if col_cumpl: series_cols.append(col_cumpl)
-            if col_util: series_cols.append(col_util)
-
+            series_cols = [c for c in [col_cumpl, col_util] if c]
             if series_cols:
                 g = dfu.groupby("Fecha")[series_cols].mean().reset_index()
                 melt = g.melt(id_vars=["Fecha"], var_name="KPI", value_name="%")
                 st.plotly_chart(
-                    px.line(
-                        melt,
-                        x="Fecha",
-                        y="%",
-                        color="KPI",
-                        markers=True,
-                        title="Evolución diaria (promedio)",
-                    ),
+                    px.line(melt, x="Fecha", y="%", color="KPI", markers=True, title="Evolución diaria (promedio)"),
                     use_container_width=True,
                     key="tabU_line_daily",
                 )
 
-        # Promedio por terminal
         if col_term:
-            kpis = []
-            if col_cumpl: kpis.append(col_cumpl)
-            if col_util: kpis.append(col_util)
-            if "_DispTec_%" in dfu.columns: kpis.append("_DispTec_%")
-
+            kpis = [c for c in [col_cumpl, col_util] if c]
+            if "_DispTec_%" in dfu.columns:
+                kpis.append("_DispTec_%")
             if kpis:
                 gt = dfu.groupby(col_term)[kpis].mean().reset_index()
                 melt2 = gt.melt(id_vars=[col_term], var_name="KPI", value_name="%")
                 st.plotly_chart(
-                    px.bar(
-                        melt2,
-                        x=col_term,
-                        y="%",
-                        color="KPI",
-                        barmode="group",
-                        title="Promedio KPIs por Terminal",
-                    ),
+                    px.bar(melt2, x=col_term, y="%", color="KPI", barmode="group", title="Promedio KPIs por Terminal"),
                     use_container_width=True,
                     key="tabU_bar_terminal_kpis",
                 )
@@ -1345,8 +1275,328 @@ with tabU:
                 cols_show.append(c)
         if "_DispTec_%" in dfu.columns and "_DispTec_%" not in cols_show:
             cols_show.append("_DispTec_%")
-
         st.dataframe(dfu[cols_show], use_container_width=True, height=520)
+
+
+# =========================================================
+# TAB SOLICITUDES DE MANTENCIÓN
+# =========================================================
+with tabSol:
+    st.subheader("🔧 Solicitudes de Mantención")
+
+    # ── Cargar datos ─────────────────────────────────────
+    try:
+        sol = load_solicitudes()
+    except Exception as e:
+        st.error(
+            "No pude cargar el archivo de Solicitudes de Mantención. "
+            "Asegúrate de compartirlo como 'Cualquier persona con el enlace → Lector'."
+        )
+        st.code(str(e))
+        sol = pd.DataFrame()
+
+    if sol.empty:
+        st.info("No hay solicitudes disponibles o el archivo está vacío.")
+    else:
+        # ── Detectar columnas clave ───────────────────────
+        col_id = find_first_col(sol, ["N°", "N", "Nro", "Nro.", "ID", "Número", "Numero", "#", "N° Solicitud"])
+        col_fecha = find_first_col(sol, ["Fecha", "Fecha Solicitud", "Fecha solicitud", "Fecha de solicitud", "Fecha Creación", "Fecha creacion"])
+        col_equipo = find_first_col(sol, ["Equipo", "Tracto", "#Tracto", "Máquina", "Maquina", "Activo"])
+        col_desc = find_first_col(sol, ["Descripción", "Descripcion", "Detalle", "Trabajo", "Falla", "Problema", "Observación"])
+        col_solicitante = find_first_col(sol, ["Solicitante", "Quien solicita", "Solicitado por", "Reporta", "Operador"])
+        col_responsable = find_first_col(sol, ["Responsable", "Técnico", "Tecnico", "Asignado", "Asignado a", "Mecánico"])
+        col_terminal = find_first_col(sol, ["Terminal", "Ubicación", "Ubicacion", "Faena", "Área"])
+        col_fecha_cierre = find_first_col(sol, ["Fecha Cierre", "Fecha cierre", "Fecha de cierre", "Cerrado", "Fecha Fin"])
+        col_obs = find_first_col(sol, ["Observaciones", "Comentarios", "Notas", "Nota", "Comentario"])
+
+        # ── Sidebar de filtros para Solicitudes ───────────
+        st.markdown("#### 🎛️ Filtros rápidos")
+        fcol1, fcol2, fcol3 = st.columns(3)
+
+        estados_disponibles = [e for e in _ESTADO_ORDER if e in sol["Estado"].unique()]
+        sel_estados_sol = fcol1.multiselect(
+            "Estado", options=estados_disponibles, default=estados_disponibles, key="sol_est"
+        )
+
+        prioridades_disponibles = [p for p in _PRIORIDAD_ORDER if p in sol["Prioridad"].unique()]
+        sel_prio_sol = fcol2.multiselect(
+            "Prioridad", options=prioridades_disponibles, default=prioridades_disponibles, key="sol_prio"
+        )
+
+        equipos_sol = []
+        if col_equipo:
+            equipos_sol = sorted([e for e in sol[col_equipo].dropna().unique() if str(e).strip()])
+        sel_equipo_sol = fcol3.multiselect("Equipo / Tracto", options=equipos_sol, key="sol_equipo")
+
+        # Filtro de fecha
+        if col_fecha and sol[col_fecha].notna().any():
+            fdc1, fdc2 = st.columns(2)
+            sol_min_date = sol[col_fecha].min().date()
+            sol_max_date = sol[col_fecha].max().date()
+            sol_desde = fdc1.date_input("Desde (solicitud)", value=sol_min_date, key="sol_desde")
+            sol_hasta = fdc2.date_input("Hasta (solicitud)", value=sol_max_date, key="sol_hasta")
+        else:
+            sol_desde = sol_hasta = None
+
+        # Aplicar filtros
+        df_sol = sol.copy()
+        if sel_estados_sol:
+            df_sol = df_sol[df_sol["Estado"].isin(sel_estados_sol)]
+        if sel_prio_sol:
+            df_sol = df_sol[df_sol["Prioridad"].isin(sel_prio_sol)]
+        if sel_equipo_sol and col_equipo:
+            df_sol = df_sol[df_sol[col_equipo].isin(sel_equipo_sol)]
+        if col_fecha and sol_desde and sol_hasta:
+            df_sol = df_sol[
+                (df_sol[col_fecha].dt.date >= sol_desde) & (df_sol[col_fecha].dt.date <= sol_hasta)
+            ]
+
+        st.divider()
+
+        # ── KPIs por estado ───────────────────────────────
+        st.markdown("#### 📊 Resumen de solicitudes")
+        cnt_total = len(df_sol)
+        cnt_abierta = len(df_sol[df_sol["Estado"] == "Abierta"])
+        cnt_plan = len(df_sol[df_sol["Estado"] == "En Planificación"])
+        cnt_cerrada = len(df_sol[df_sol["Estado"] == "Cerrada"])
+        cnt_rechazada = len(df_sol[df_sol["Estado"] == "Rechazada"])
+
+        k0, k1, k2, k3, k4 = st.columns(5)
+        k0.metric("Total", cnt_total)
+        k1.metric("🟡 Abiertas", cnt_abierta)
+        k2.metric("🔵 En Planificación", cnt_plan)
+        k3.metric("🟢 Cerradas", cnt_cerrada)
+        k4.metric("🔴 Rechazadas", cnt_rechazada)
+
+        # Tasa de cierre
+        if cnt_total > 0:
+            tasa_cierre = cnt_cerrada / cnt_total * 100
+            tasa_rechazo = cnt_rechazada / cnt_total * 100
+            ta, tb = st.columns(2)
+            ta.metric("Tasa de cierre", f"{tasa_cierre:.1f}%")
+            tb.metric("Tasa de rechazo", f"{tasa_rechazo:.1f}%")
+
+        st.divider()
+
+        # ── Gráficos ─────────────────────────────────────
+        gcol1, gcol2 = st.columns(2)
+
+        # Donut por estado
+        with gcol1:
+            cnt_estado = df_sol["Estado"].value_counts().reset_index()
+            cnt_estado.columns = ["Estado", "Cantidad"]
+            colors_donut = [_ESTADO_COLORS.get(e, "#9ca3af") for e in cnt_estado["Estado"]]
+            fig_donut = go.Figure(
+                go.Pie(
+                    labels=cnt_estado["Estado"],
+                    values=cnt_estado["Cantidad"],
+                    hole=0.55,
+                    marker_colors=colors_donut,
+                    textinfo="label+percent",
+                    hovertemplate="<b>%{label}</b><br>%{value} solicitudes (%{percent})<extra></extra>",
+                )
+            )
+            fig_donut.update_layout(
+                title="Distribución por Estado",
+                showlegend=False,
+                height=320,
+                margin=dict(t=40, b=10, l=10, r=10),
+            )
+            st.plotly_chart(fig_donut, use_container_width=True, key="sol_donut_estado")
+
+        # Barras por prioridad
+        with gcol2:
+            cnt_prio = df_sol["Prioridad"].value_counts().reindex(_PRIORIDAD_ORDER, fill_value=0).reset_index()
+            cnt_prio.columns = ["Prioridad", "Cantidad"]
+            cnt_prio = cnt_prio[cnt_prio["Cantidad"] > 0]
+            colors_prio = [_PRIORIDAD_COLORS.get(p, "#9ca3af") for p in cnt_prio["Prioridad"]]
+            fig_prio = go.Figure(
+                go.Bar(
+                    x=cnt_prio["Prioridad"],
+                    y=cnt_prio["Cantidad"],
+                    marker_color=colors_prio,
+                    text=cnt_prio["Cantidad"],
+                    textposition="outside",
+                    hovertemplate="<b>%{x}</b>: %{y}<extra></extra>",
+                )
+            )
+            fig_prio.update_layout(
+                title="Solicitudes por Prioridad",
+                yaxis_title="Cantidad",
+                height=320,
+                margin=dict(t=40, b=10, l=10, r=10),
+            )
+            st.plotly_chart(fig_prio, use_container_width=True, key="sol_bar_prioridad")
+
+        # Barras por equipo (Top 10)
+        if col_equipo and df_sol[col_equipo].notna().any():
+            cnt_eq = (
+                df_sol.groupby(col_equipo).size().reset_index(name="Solicitudes")
+                .sort_values("Solicitudes", ascending=False).head(10)
+            )
+            fig_eq = px.bar(
+                cnt_eq, x=col_equipo, y="Solicitudes",
+                title="Top 10 Equipos con más solicitudes",
+                color="Solicitudes",
+                color_continuous_scale="Oranges",
+            )
+            fig_eq.update_layout(height=320, margin=dict(t=40, b=10, l=10, r=10), coloraxis_showscale=False)
+            st.plotly_chart(fig_eq, use_container_width=True, key="sol_bar_equipos")
+
+        # Evolución temporal (si hay fecha)
+        if col_fecha and df_sol[col_fecha].notna().any():
+            df_ts = df_sol.copy()
+            df_ts["_mes"] = df_ts[col_fecha].dt.to_period("M").astype(str)
+            ts_data = (
+                df_ts.groupby(["_mes", "Estado"]).size().reset_index(name="Cantidad")
+            )
+            if not ts_data.empty:
+                fig_ts = px.bar(
+                    ts_data, x="_mes", y="Cantidad", color="Estado",
+                    color_discrete_map=_ESTADO_COLORS,
+                    title="Solicitudes por mes y estado",
+                    labels={"_mes": "Mes"},
+                    barmode="stack",
+                )
+                fig_ts.update_layout(height=320, margin=dict(t=40, b=10, l=10, r=10))
+                st.plotly_chart(fig_ts, use_container_width=True, key="sol_ts_mensual")
+
+        st.divider()
+
+        # ── Vistas por estado (pestañas internas) ─────────
+        st.markdown("#### 📋 Detalle por estado")
+        sub_abierta, sub_plan, sub_cerrada, sub_rechazada, sub_all = st.tabs([
+            f"🟡 Abiertas ({cnt_abierta})",
+            f"🔵 En Planificación ({cnt_plan})",
+            f"🟢 Cerradas ({cnt_cerrada})",
+            f"🔴 Rechazadas ({cnt_rechazada})",
+            "📚 Historial completo",
+        ])
+
+        def _render_solicitudes_tabla(df_sub: pd.DataFrame, estado_label: str, key_suffix: str):
+            """Renderiza la tabla de solicitudes con columnas relevantes y estilos."""
+            if df_sub.empty:
+                st.info(f"No hay solicitudes en estado '{estado_label}' con los filtros actuales.")
+                return
+
+            # Seleccionar columnas a mostrar
+            cols_display = []
+            for c in [col_id, col_fecha, col_equipo, col_terminal, col_prioridad_col, "Prioridad", col_desc,
+                      col_solicitante, col_responsable, col_fecha_cierre, col_obs, "Estado"]:
+                if c and c in df_sub.columns and c not in cols_display:
+                    cols_display.append(c)
+
+            if not cols_display:
+                cols_display = df_sub.columns.tolist()
+
+            df_view = df_sub[cols_display].copy()
+
+            # Agregar badge de estado al inicio
+            if "Estado" in df_view.columns:
+                df_view.insert(0, "🏷️", df_view["Estado"].map(lambda e: _badge_estado(e)))
+
+            # Formatear fechas
+            for dc in [col_fecha, col_fecha_cierre]:
+                if dc and dc in df_view.columns:
+                    try:
+                        df_view[dc] = pd.to_datetime(df_view[dc], errors="coerce").dt.strftime("%d/%m/%Y")
+                    except Exception:
+                        pass
+
+            # Aplicar estilos por fila
+            def _row_style(row):
+                return _style_solicitudes(row)
+
+            styled = df_view.style.apply(_row_style, axis=1)
+
+            st.dataframe(styled, use_container_width=True, height=min(400, max(200, len(df_view) * 38 + 60)))
+
+            # Botón de descarga
+            csv = df_sub.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                f"⬇️ Exportar {estado_label} (CSV)",
+                data=csv,
+                file_name=f"solicitudes_{key_suffix}.csv",
+                mime="text/csv",
+                key=f"dl_{key_suffix}",
+            )
+
+        # Detectar columna prioridad original (para incluir si difiere de "Prioridad" normalizada)
+        col_prioridad_col = find_first_col(sol, ["Prioridad", "Priority", "Urgencia", "Nivel"])
+
+        with sub_abierta:
+            df_ab = df_sol[df_sol["Estado"] == "Abierta"].copy()
+            if not df_ab.empty and col_prioridad_col:
+                df_ab = df_ab.sort_values("Prioridad", key=lambda s: s.map(
+                    {p: i for i, p in enumerate(_PRIORIDAD_ORDER)}
+                ).fillna(99))
+            # Alerta visual si hay críticas abiertas
+            criticas_abiertas = len(df_ab[df_ab["Prioridad"] == "Crítica"]) if not df_ab.empty else 0
+            if criticas_abiertas > 0:
+                st.warning(
+                    f"⚠️ Hay **{criticas_abiertas}** solicitud(es) de prioridad **Crítica** abiertas que requieren atención inmediata.",
+                    icon="🚨",
+                )
+            _render_solicitudes_tabla(df_ab, "Abiertas", "abiertas")
+
+        with sub_plan:
+            df_pl = df_sol[df_sol["Estado"] == "En Planificación"].copy()
+            _render_solicitudes_tabla(df_pl, "En Planificación", "planificacion")
+
+        with sub_cerrada:
+            df_ce = df_sol[df_sol["Estado"] == "Cerrada"].copy()
+            if not df_ce.empty and col_fecha and col_fecha in df_ce.columns:
+                df_ce = df_ce.sort_values(col_fecha, ascending=False)
+            _render_solicitudes_tabla(df_ce, "Cerradas", "cerradas")
+
+        with sub_rechazada:
+            df_re = df_sol[df_sol["Estado"] == "Rechazada"].copy()
+            _render_solicitudes_tabla(df_re, "Rechazadas", "rechazadas")
+
+        with sub_all:
+            st.markdown("**Historial completo** — todas las solicitudes con filtros aplicados.")
+
+            # Búsqueda libre por texto
+            busqueda = st.text_input(
+                "🔍 Buscar en descripción / equipo / solicitante",
+                placeholder="Escribe para filtrar...",
+                key="sol_busqueda",
+            )
+
+            df_hist = df_sol.copy()
+            if busqueda.strip():
+                mask = pd.Series(False, index=df_hist.index)
+                for sc in [col_desc, col_equipo, col_solicitante, col_responsable, col_obs, col_id]:
+                    if sc and sc in df_hist.columns:
+                        mask |= df_hist[sc].astype(str).str.lower().str.contains(
+                            busqueda.strip().lower(), na=False
+                        )
+                df_hist = df_hist[mask]
+
+            st.caption(f"Mostrando **{len(df_hist)}** solicitudes.")
+            _render_solicitudes_tabla(df_hist, "Historial completo", "historial")
+
+        st.divider()
+        with st.expander("🛈 Cómo funciona esta sección"):
+            st.markdown(
+                """
+**Solicitudes de Mantención** se carga desde el Google Sheet configurado.
+
+**Normalización de estados**: el sistema reconoce automáticamente variantes como "ABIERTA", "OPEN", "PENDIENTE" → **Abierta**;
+"EN PLANIFICACION", "EN PROCESO" → **En Planificación**; "CERRADA", "COMPLETADA", "FINALIZADA" → **Cerrada**;
+"RECHAZADA", "CANCELADA" → **Rechazada**.
+
+**Prioridades**: se normalizan "CRITICA/URGENTE" → **Crítica**, "ALTA" → **Alta**, "MEDIA/NORMAL" → **Media**, "BAJA" → **Baja**.
+
+**Alerta automática**: si hay solicitudes **Críticas abiertas**, aparece una advertencia visible al ingresar a la pestaña.
+
+**Exportación**: cada sub-pestaña tiene su botón de descarga CSV.
+
+> Si las columnas de tu hoja tienen nombres distintos, nómbralas de forma estándar
+> (Estado, Prioridad, Equipo, Descripción, Fecha, Solicitante, Responsable, Fecha Cierre)
+> o avísame para agregar el alias específico.
+                """
+            )
 
 # =========================================================
 # TAB 4: EXPORT
@@ -1372,5 +1622,5 @@ with tab4:
         )
 
 st.caption(
-    "Fuente: Google Sheets exportado a XLSX (Faena, Detenciones, Estado_Flota). Dashboard Streamlit."
+    "Fuente: Google Sheets exportado a XLSX (Faena, Detenciones, Estado_Flota, Solicitudes). Dashboard Streamlit."
 )
