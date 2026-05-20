@@ -1428,20 +1428,97 @@ with tabSol:
             )
             st.plotly_chart(fig_prio, use_container_width=True, key="sol_bar_prioridad")
 
+        # ── Fila: Equipos + Ranking Solicitantes ──────────
+        eq_col1, eq_col2 = st.columns(2)
+
         # Barras por equipo (Top 10)
-        if col_equipo and df_sol[col_equipo].notna().any():
-            cnt_eq = (
-                df_sol.groupby(col_equipo).size().reset_index(name="Solicitudes")
-                .sort_values("Solicitudes", ascending=False).head(10)
-            )
-            fig_eq = px.bar(
-                cnt_eq, x=col_equipo, y="Solicitudes",
-                title="Top 10 Equipos con más solicitudes",
-                color="Solicitudes",
-                color_continuous_scale="Oranges",
-            )
-            fig_eq.update_layout(height=320, margin=dict(t=40, b=10, l=10, r=10), coloraxis_showscale=False)
-            st.plotly_chart(fig_eq, use_container_width=True, key="sol_bar_equipos")
+        with eq_col1:
+            if col_equipo and df_sol[col_equipo].notna().any():
+                cnt_eq = (
+                    df_sol[df_sol[col_equipo].astype(str).str.strip() != ""]
+                    .groupby(col_equipo).size().reset_index(name="Solicitudes")
+                    .sort_values("Solicitudes", ascending=False).head(10)
+                )
+                fig_eq = px.bar(
+                    cnt_eq, x=col_equipo, y="Solicitudes",
+                    title="🚜 Top 10 Equipos con más solicitudes",
+                    color="Solicitudes",
+                    color_continuous_scale="Oranges",
+                )
+                fig_eq.update_layout(height=360, margin=dict(t=40, b=10, l=10, r=10), coloraxis_showscale=False)
+                st.plotly_chart(fig_eq, use_container_width=True, key="sol_bar_equipos")
+            else:
+                st.info("No hay columna de Equipo disponible.")
+
+        # Ranking de solicitantes (horizontal, con medalla)
+        with eq_col2:
+            if col_solicitante and df_sol[col_solicitante].notna().any():
+                cnt_sol_rank = (
+                    df_sol[df_sol[col_solicitante].astype(str).str.strip() != ""]
+                    .groupby(col_solicitante).size().reset_index(name="Solicitudes")
+                    .sort_values("Solicitudes", ascending=False).head(10)
+                )
+                # Colores degradados: el 1° dorado, 2° plata, 3° bronce, resto azul
+                rank_colors = []
+                for i in range(len(cnt_sol_rank)):
+                    if i == 0:
+                        rank_colors.append("#f59e0b")   # 🥇 dorado
+                    elif i == 1:
+                        rank_colors.append("#94a3b8")   # 🥈 plata
+                    elif i == 2:
+                        rank_colors.append("#b45309")   # 🥉 bronce
+                    else:
+                        rank_colors.append("#3b82f6")   # resto azul
+
+                # Invertir para que el 1° quede arriba en barras horizontales
+                cnt_sol_rank_inv = cnt_sol_rank.iloc[::-1].copy()
+                rank_colors_inv = rank_colors[::-1]
+
+                fig_rank = go.Figure(
+                    go.Bar(
+                        x=cnt_sol_rank_inv["Solicitudes"],
+                        y=cnt_sol_rank_inv[col_solicitante],
+                        orientation="h",
+                        marker_color=rank_colors_inv,
+                        text=cnt_sol_rank_inv["Solicitudes"],
+                        textposition="outside",
+                        hovertemplate="<b>%{y}</b><br>%{x} solicitudes<extra></extra>",
+                    )
+                )
+                fig_rank.update_layout(
+                    title="🏆 Ranking de Solicitantes",
+                    xaxis_title="Nº de solicitudes",
+                    yaxis_title="",
+                    height=360,
+                    margin=dict(t=40, b=10, l=10, r=60),
+                    yaxis=dict(tickfont=dict(size=12)),
+                )
+                st.plotly_chart(fig_rank, use_container_width=True, key="sol_rank_solicitantes")
+
+                # Tabla resumen compacta con medallas
+                st.markdown("**Detalle del ranking**")
+                medallas = {0: "🥇", 1: "🥈", 2: "🥉"}
+                ranking_rows = []
+                for i, (_, row) in enumerate(cnt_sol_rank.iterrows()):
+                    pct = row["Solicitudes"] / cnt_sol_rank["Solicitudes"].sum() * 100
+                    # desglose por estado para este solicitante
+                    sub = df_sol[df_sol[col_solicitante] == row[col_solicitante]]
+                    ab = len(sub[sub["Estado"] == "Abierta"])
+                    pl = len(sub[sub["Estado"] == "En Planificación"])
+                    ce = len(sub[sub["Estado"] == "Cerrada"])
+                    ranking_rows.append({
+                        "Pos.": f"{medallas.get(i, str(i+1)+'°')}",
+                        "Solicitante": row[col_solicitante],
+                        "Total": int(row["Solicitudes"]),
+                        "% del total": f"{pct:.1f}%",
+                        "🟡 Abiertas": ab,
+                        "🔵 Planif.": pl,
+                        "🟢 Cerradas": ce,
+                    })
+                df_rank_display = pd.DataFrame(ranking_rows)
+                st.dataframe(df_rank_display, use_container_width=True, height=320, hide_index=True)
+            else:
+                st.info("No hay columna de Solicitante disponible.")
 
         # Evolución temporal (si hay fecha)
         if col_fecha and df_sol[col_fecha].notna().any():
